@@ -1,0 +1,11 @@
+id: MNT-001
+title: TODOs must reference a ticket
+severity: minor
+detector: rule
+rule: >
+  TODO and FIXME comments must reference a tracking ticket (for example PROJ-123 or #123) so the
+  follow-up work is not lost.
+compliant: |
+  // TODO(PAY-412): remove the legacy currency path after migration
+violating: |
+  // TODO: remove this later

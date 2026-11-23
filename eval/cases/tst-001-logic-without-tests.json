@@ -1,0 +1,19 @@
+{
+  "id": "tst-001-logic-without-tests",
+  "description": "New billing logic in a diff with no test file.",
+  "tags": [
+    "rule",
+    "diff"
+  ],
+  "input": "diff --git a/src/billing/proration.ts b/src/billing/proration.ts\nnew file mode 100644\n--- /dev/null\n+++ b/src/billing/proration.ts\n@@ -0,0 +1,5 @@\n+export function prorate(amountCents: number, daysUsed: number, daysInPeriod: number): number {\n+  if (daysInPeriod <= 0) throw new RangeError(\"daysInPeriod must be positive\");\n+  const ratio = Math.min(Math.max(daysUsed / daysInPeriod, 0), 1);\n+  return Math.round(amountCents * ratio);\n+}\n",
+  "expected": [
+    {
+      "standard_id": "TST-001",
+      "file": "src/billing/proration.ts",
+      "lines": [
+        1,
+        1
+      ]
+    }
+  ]
+}

@@ -1,0 +1,138 @@
+import type { Coverage, FileChunk, ParsedInput, SourceLine } from "./types.ts";
+
+export const MAX_INPUT_BYTES = 100_000;
+export const MAX_FILES = 20;
+export const SNIPPET_PATH = "snippet";
+
+const HUNK = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
+
+/** A unified diff has file headers or hunk headers; anything else is treated as a snippet. */
+export function looksLikeDiff(input: string): boolean {
+  return /^diff --git /m.test(input) || (/^--- /m.test(input) && /^\+\+\+ /m.test(input)) || /^@@ -\d+/m.test(input);
+}
+
+export function isTestPath(path: string): boolean {
+  return (
+    /(^|\/)(__tests__|tests?|spec)\//i.test(path) ||
+    /\.(test|spec)\.[cm]?[jt]sx?$/i.test(path) ||
+    /_test\.(go|py)$/i.test(path) ||
+    /(^|\/)test_[^/]+\.py$/i.test(path)
+  );
+}
+
+const CODE_EXT = /\.(ts|tsx|js|jsx|mjs|cjs|py|go|java|kt|rb|rs|cs|php|swift|scala)$/i;
+export function isCodePath(path: string): boolean {
+  return CODE_EXT.test(path);
+}
+
+/**
+ * Parse pasted input into files with new-file line numbers.
+ * - Snippet: one file, every line counts as added.
+ * - Diff: removed lines are dropped (they are not in the new code), context lines are kept with
+ *   `added: false`, deleted files are ignored, and files past MAX_FILES are recorded as skipped.
+ */
+export function parseInput(input: string): ParsedInput {
+  const text = input.replace(/\r\n?/g, "\n");
+  if (!looksLikeDiff(text)) {
+    const lines = text.split("\n").map((t, i): SourceLine => ({ n: i + 1, text: t, added: true }));
+    while (lines.length && lines[lines.length - 1]!.text === "") lines.pop();
+    return {
+      kind: "snippet",
+      files: [{ path: SNIPPET_PATH, lines, isTest: false }],
+      coverage: { filesTotal: 1, filesReviewed: 1, skipped: [] },
+    };
+  }
+
+  const raw = splitDiffFiles(text);
+  const coverage: Coverage = { filesTotal: 0, filesReviewed: 0, skipped: [] };
+  const files: FileChunk[] = [];
+  for (const f of raw) {
+    if (f.deleted) continue; // nothing left to review
+    coverage.filesTotal++;
+    if (f.binary) {
+      coverage.skipped.push({ file: f.path, reason: "binary file" });
+      continue;
+    }
+    if (files.length >= MAX_FILES) {
+      coverage.skipped.push({ file: f.path, reason: `over the ${MAX_FILES}-file limit` });
+      continue;
+    }
+    files.push({ path: f.path, lines: f.lines, isTest: isTestPath(f.path) });
+    coverage.filesReviewed++;
+  }
+  return { kind: "diff", files, coverage };
+}
+
+interface RawFile {
+  path: string;
+  lines: SourceLine[];
+  deleted: boolean;
+  binary: boolean;
+}
+
+function splitDiffFiles(text: string): RawFile[] {
+  const out: RawFile[] = [];
+  let cur: RawFile | null = null;
+  let newLine = 0;
+  let inHunk = false;
+
+  const start = (path: string) => {
+    cur = { path, lines: [], deleted: false, binary: false };
+    out.push(cur);
+    inHunk = false;
+  };
+
+  const all = text.split("\n");
+  if (all[all.length - 1] === "") all.pop(); // the newline that ends the last line is not a line
+  let headerOpen = false; // a "diff --git" line was seen and its "---/+++" pair hasn't been yet
+  for (let i = 0; i < all.length; i++) {
+    const line = all[i]!;
+    const git = /^diff --git a\/(.+?) b\/(.+)$/.exec(line);
+    if (git) {
+      start(git[2]!);
+      headerOpen = true;
+      continue;
+    }
+    // "--- x" followed by "+++ y" is a file header, even straight after another file's hunk.
+    if (line.startsWith("--- ") && all[i + 1]?.startsWith("+++ ")) {
+      const target = all[i + 1]!.slice(4).trim();
+      if (!headerOpen) start(stripPrefix(target === "/dev/null" ? line.slice(4) : target));
+      headerOpen = false;
+      inHunk = false;
+      if (target === "/dev/null") cur!.deleted = true;
+      else cur!.path = stripPrefix(target);
+      i++; // consume the "+++" line
+      continue;
+    }
+    if (!cur) {
+      if (HUNK.test(line)) start(SNIPPET_PATH);
+      else continue;
+    }
+    const c: RawFile = cur!;
+    if (/^Binary files .* differ$/.test(line) || line.startsWith("GIT binary patch")) {
+      c.binary = true;
+      continue;
+    }
+    if (line.startsWith("deleted file mode")) {
+      c.deleted = true;
+      continue;
+    }
+    const hunk = HUNK.exec(line);
+    if (hunk) {
+      newLine = Number(hunk[1]);
+      inHunk = true;
+      continue;
+    }
+    if (!inHunk) continue; // index lines, mode lines, etc.
+    if (line.startsWith("+")) c.lines.push({ n: newLine++, text: line.slice(1), added: true });
+    else if (line.startsWith(" ")) c.lines.push({ n: newLine++, text: line.slice(1), added: false });
+    else if (line === "") c.lines.push({ n: newLine++, text: "", added: false });
+    else if (line.startsWith("-") || line.startsWith("\\")) continue; // removed line / "No newline at end of file"
+    else inHunk = false; // something else: the hunk is over
+  }
+  return out;
+}
+
+function stripPrefix(p: string): string {
+  return p.trim().replace(/^[ab]\//, "").split("\t")[0]!;
+}

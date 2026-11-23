@@ -1,0 +1,30 @@
+{
+  "id": "mixed-modified-file-line-numbers",
+  "description": "A change to an existing file starting at line 40: a token literal replaces an env read and a FIXME is added. Checks new-file line numbering.",
+  "tags": [
+    "rule",
+    "diff"
+  ],
+  "input": "diff --git a/src/sync.ts b/src/sync.ts\nindex 1111111..2222222 100644\n--- a/src/sync.ts\n+++ b/src/sync.ts\n@@ -40,6 +40,7 @@ export async function sync(env: Env) {\n   const items = await load(env);\n-  const token = env.SYNC_TOKEN;\n+  const token = \"demo-sync-token-not-real-0042\";\n+  // FIXME: batch these\n   for (const item of items) {\n     await push(item, token);\n   }\n",
+  "expected": [
+    {
+      "standard_id": "SEC-001",
+      "file": "src/sync.ts",
+      "lines": [
+        41,
+        41
+      ]
+    },
+    {
+      "standard_id": "MNT-001",
+      "file": "src/sync.ts",
+      "lines": [
+        42,
+        42
+      ]
+    }
+  ],
+  "must_not_flag": [
+    "TST-001"
+  ]
+}

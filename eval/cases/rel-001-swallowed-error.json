@@ -1,0 +1,17 @@
+{
+  "id": "rel-001-swallowed-error",
+  "description": "Empty catch block. LLM standard: not scored by the rules config.",
+  "tags": [
+    "llm"
+  ],
+  "input": "export async function save(order) {\n  try {\n    await db.insert(order);\n  } catch (e) {}\n}\n",
+  "expected": [
+    {
+      "standard_id": "REL-001",
+      "lines": [
+        4,
+        4
+      ]
+    }
+  ]
+}

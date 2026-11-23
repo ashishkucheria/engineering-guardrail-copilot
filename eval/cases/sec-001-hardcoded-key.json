@@ -1,0 +1,17 @@
+{
+  "id": "sec-001-hardcoded-key",
+  "description": "API key assigned as a string literal.",
+  "tags": [
+    "rule"
+  ],
+  "input": "import { charge } from \"./client\";\nconst apiKey = \"demo-0000-not-a-real-key-9f8e7d\";\nexport const run = () => charge(apiKey);\n",
+  "expected": [
+    {
+      "standard_id": "SEC-001",
+      "lines": [
+        2,
+        2
+      ]
+    }
+  ]
+}

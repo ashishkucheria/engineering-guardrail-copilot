@@ -1,0 +1,7 @@
+id: TST-001
+title: New logic ships with tests
+severity: minor
+detector: rule
+rule: >
+  A change that adds non-trivial logic to a code file must include a test change in the same diff.
+  Checked on diffs only; a pasted snippet has no context to tell.

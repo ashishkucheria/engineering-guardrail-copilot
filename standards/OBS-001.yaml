@@ -1,0 +1,12 @@
+id: OBS-001
+title: Do not log secrets or personal data
+severity: major
+detector: llm
+rule: >
+  Logs must not contain credentials, tokens, full request bodies with personal data, or personal
+  identifiers such as email addresses, phone numbers or card numbers. Log identifiers or redacted
+  values instead.
+compliant: |
+  log.info("user signed in", { userId: user.id });
+violating: |
+  console.log("login", { email: user.email, password: body.password });

@@ -1,0 +1,17 @@
+{
+  "id": "rel-002-fetch-no-timeout",
+  "description": "Outbound fetch with no timeout. LLM standard: not scored by the rules config.",
+  "tags": [
+    "llm"
+  ],
+  "input": "export async function getRates() {\n  const res = await fetch(\"https://rates.example.com/latest\");\n  return res.json();\n}\n",
+  "expected": [
+    {
+      "standard_id": "REL-002",
+      "lines": [
+        2,
+        2
+      ]
+    }
+  ]
+}

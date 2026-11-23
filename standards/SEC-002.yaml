@@ -1,0 +1,11 @@
+id: SEC-002
+title: No SQL built from unescaped input
+severity: blocker
+detector: llm
+rule: >
+  SQL must not be built by concatenating or interpolating values that come from a request, user or
+  other external input. Use parameterised queries (placeholders with bound values).
+compliant: |
+  db.prepare("SELECT * FROM users WHERE id = ?").bind(userId);
+violating: |
+  db.prepare(`SELECT * FROM users WHERE id = '${req.query.id}'`);

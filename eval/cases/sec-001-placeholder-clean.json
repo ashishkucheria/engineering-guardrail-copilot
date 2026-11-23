@@ -1,0 +1,13 @@
+{
+  "id": "sec-001-placeholder-clean",
+  "description": "Example env file with placeholders, not credentials.",
+  "tags": [
+    "rule",
+    "clean"
+  ],
+  "input": "# Copy to .env and fill in\nAPI_KEY=\"<your-api-key>\"\nCLIENT_SECRET=\"changeme\"\n",
+  "expected": [],
+  "must_not_flag": [
+    "SEC-001"
+  ]
+}

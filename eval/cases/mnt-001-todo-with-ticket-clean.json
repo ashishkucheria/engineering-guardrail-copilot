@@ -1,0 +1,13 @@
+{
+  "id": "mnt-001-todo-with-ticket-clean",
+  "description": "TODO comment that references a ticket.",
+  "tags": [
+    "rule",
+    "clean"
+  ],
+  "input": "function total(items) {\n  // TODO(SHOP-981): handle discounts\n  return items.reduce((s, i) => s + i.price, 0);\n}\n",
+  "expected": [],
+  "must_not_flag": [
+    "MNT-001"
+  ]
+}
