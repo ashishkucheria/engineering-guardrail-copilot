@@ -1,0 +1,25 @@
+{
+  "id": "mnt-001-sha-is-not-a-ticket",
+  "description": "SHA-256 and UTF-8 look like ticket keys but are not (review of PR #2).",
+  "tags": [
+    "rule",
+    "review-regression"
+  ],
+  "input": "function digest(s) {\n  // TODO: switch to SHA-256\n  // FIXME: assumes UTF-8\n  return md5(s);\n}\n",
+  "expected": [
+    {
+      "standard_id": "MNT-001",
+      "lines": [
+        2,
+        2
+      ]
+    },
+    {
+      "standard_id": "MNT-001",
+      "lines": [
+        3,
+        3
+      ]
+    }
+  ]
+}

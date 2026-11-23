@@ -1,0 +1,35 @@
+{
+  "name": "engineering-guardrail-copilot",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "deploy": "npm run build && wrangler deploy",
+    "typecheck": "tsc -b",
+    "test": "vitest run",
+    "db:migrate:local": "wrangler d1 migrations apply DB --local",
+    "db:seed:local": "node scripts/seed.ts && wrangler d1 execute DB --local --file=.wrangler/seed.sql",
+    "db:setup:local": "npm run db:migrate:local && npm run db:seed:local",
+    "smoke": "node scripts/smoke.mjs",
+    "eval": "node eval/run.ts",
+    "cf-typegen": "wrangler types"
+  },
+  "dependencies": {
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.70.1",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.8",
+    "vitest": "^5.1.1",
+    "wrangler": "^4.166.0",
+    "yaml": "^2.9.1"
+  }
+}

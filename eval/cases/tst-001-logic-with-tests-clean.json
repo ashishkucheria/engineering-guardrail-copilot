@@ -1,0 +1,14 @@
+{
+  "id": "tst-001-logic-with-tests-clean",
+  "description": "The same logic, with a test file in the diff.",
+  "tags": [
+    "rule",
+    "diff",
+    "clean"
+  ],
+  "input": "diff --git a/src/billing/proration.ts b/src/billing/proration.ts\nnew file mode 100644\n--- /dev/null\n+++ b/src/billing/proration.ts\n@@ -0,0 +1,5 @@\n+export function prorate(amountCents: number, daysUsed: number, daysInPeriod: number): number {\n+  if (daysInPeriod <= 0) throw new RangeError(\"daysInPeriod must be positive\");\n+  const ratio = Math.min(Math.max(daysUsed / daysInPeriod, 0), 1);\n+  return Math.round(amountCents * ratio);\n+}\ndiff --git a/src/billing/proration.test.ts b/src/billing/proration.test.ts\nnew file mode 100644\n--- /dev/null\n+++ b/src/billing/proration.test.ts\n@@ -0,0 +1,4 @@\n+import { prorate } from \"./proration\";\n+test(\"half a period\", () => {\n+  expect(prorate(1000, 15, 30)).toBe(500);\n+});\n",
+  "expected": [],
+  "must_not_flag": [
+    "TST-001"
+  ]
+}

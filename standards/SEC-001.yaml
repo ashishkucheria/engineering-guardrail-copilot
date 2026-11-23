@@ -1,0 +1,11 @@
+id: SEC-001
+title: No hardcoded secrets
+severity: blocker
+detector: rule+llm
+rule: >
+  Credentials, API keys, tokens, passwords and private keys must not appear as literal values in
+  source code. Read them from environment bindings or a secret store at runtime.
+compliant: |
+  const apiKey = env.PAYMENTS_API_KEY;
+violating: |
+  const apiKey = "demo-0000-not-a-real-key-9f8e7d";

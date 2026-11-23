@@ -1,0 +1,12 @@
+id: REL-001
+title: Errors must not be silently swallowed
+severity: major
+detector: llm
+rule: >
+  A caught error must be handled: rethrown, returned as an explicit failure, or logged with enough
+  context to diagnose it. An empty catch block, or one that discards the error and carries on as if
+  nothing happened, is a violation.
+compliant: |
+  try { await save(order); } catch (err) { log.error("save failed", { orderId: order.id, err }); throw err; }
+violating: |
+  try { await save(order); } catch (e) {}

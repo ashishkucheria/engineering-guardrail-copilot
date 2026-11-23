@@ -1,0 +1,11 @@
+id: REL-002
+title: Outbound network calls need a timeout
+severity: major
+detector: llm
+rule: >
+  Every outbound HTTP or RPC call must have a bounded timeout (for example an AbortSignal timeout),
+  so a slow dependency cannot hang the caller indefinitely.
+compliant: |
+  await fetch(url, { signal: AbortSignal.timeout(5000) });
+violating: |
+  await fetch(url);

@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Generated Worker types are up to date
+        run: npx wrangler types --check
+      - run: npm run typecheck
+      - run: npm test
+      - name: Eval (rule engine, no network)
+        run: npm run eval -- --config rules --strict
+      - name: Build
+        run: npm run build
+      - name: API smoke test against a local server
+        run: |
+          npm run db:setup:local
+          npx vite dev --port 5173 --strictPort > dev.log 2>&1 &
+          for i in $(seq 1 60); do curl -sf http://localhost:5173/api/users > /dev/null && break; sleep 1; done
+          npm run smoke
+      - name: Dev server log
+        if: failure()
+        run: cat dev.log || true

@@ -1,0 +1,13 @@
+{
+  "id": "sec-001-env-binding-clean",
+  "description": "Key read from an env binding; a credential-named variable holding a URL. Looks risky, complies.",
+  "tags": [
+    "rule",
+    "clean"
+  ],
+  "input": "export function client(env: Env) {\n  const apiKey = env.PAYMENTS_API_KEY;\n  const tokenUrl = \"https://auth.example.com/oauth/token\";\n  return new Client({ apiKey, tokenUrl });\n}\n",
+  "expected": [],
+  "must_not_flag": [
+    "SEC-001"
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "id": "mnt-001-todo-without-ticket",
+  "description": "TODO comment with no ticket.",
+  "tags": [
+    "rule"
+  ],
+  "input": "function total(items) {\n  // TODO: handle discounts\n  return items.reduce((s, i) => s + i.price, 0);\n}\n",
+  "expected": [
+    {
+      "standard_id": "MNT-001",
+      "lines": [
+        2,
+        2
+      ]
+    }
+  ]
+}

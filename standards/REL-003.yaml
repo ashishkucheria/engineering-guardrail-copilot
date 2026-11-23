@@ -1,0 +1,11 @@
+id: REL-003
+title: No unbounded loops or retries
+severity: major
+detector: llm
+rule: >
+  Loops that wait on external state and retry logic must have an explicit bound: a maximum number of
+  attempts, a deadline, or both. Retries should back off.
+compliant: |
+  for (let attempt = 1; attempt <= 5; attempt++) { if (await tryOnce()) break; await sleep(2 ** attempt * 100); }
+violating: |
+  while (true) { if (await tryOnce()) break; }
