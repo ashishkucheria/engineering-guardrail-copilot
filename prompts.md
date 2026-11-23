@@ -357,3 +357,19 @@ Rate limit + budget
 
 **Outcome:** The design doc now specifies the chosen option: per-client rate limits through the Workers Rate
 Limiting binding, plus a strict global daily LLM budget in D1, built in 3-B before the first deploy.
+
+---
+
+## 6. Approving PRs #1 and #2
+
+**Intent:** Approve the design (PR #1) and the 3-A foundation (PR #2) after reviewing the fixes, and have both
+merged to master so 3-B can start.
+
+```text
+Approved, merge both
+```
+
+**Outcome:** Both PRs were merged to master with merge commits. Deleting PR #1's branch closed PR #2 instead of
+retargeting it, so the branch was restored, PR #2 reopened and retargeted to master, then merged. The merged tree
+is identical to the commit CI had passed. This entry is recorded on the 3-B branch, so nothing went to master
+outside a PR.
