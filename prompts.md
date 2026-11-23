@@ -343,3 +343,17 @@ PR #1: design findings (they affect 3-B and 3-C)
 **Outcome:** The assistant adopted the design recommendations in `docs/phase-2-design.md` (PR #1), leaving one
 decision for me (how to protect the first public deploy). On PR #2 it fixed the redaction leak and all five
 should-fix items, plus the cheap nits, each with tests. The findings cap is deferred to 3-B. Nothing was merged.
+
+---
+
+## 5. Choosing how to protect the first public deploy
+
+**Intent:** Decide the one open item from my review (item 7: LLM cost abuse through a spoofable identity). Picked
+from the two options the assistant offered, before any public deploy.
+
+```text
+Rate limit + budget
+```
+
+**Outcome:** The design doc now specifies the chosen option: per-client rate limits through the Workers Rate
+Limiting binding, plus a strict global daily LLM budget in D1, built in 3-B before the first deploy.
