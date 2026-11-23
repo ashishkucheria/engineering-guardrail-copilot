@@ -255,3 +255,30 @@ Use:
 **Outcome:** The assistant created the private repo `engineering-guardrail-copilot` with `master` as the default
 branch, made my first assignment repo private, and wrote the Phase 2 design on the branch `phase-2-design`, opened
 as a PR for my review.
+
+---
+
+## 3. Deciding the open design questions and starting Phase 3
+
+**Intent:** Settle the three open questions from the Phase 2 design (challenges never clear a violation; only
+approvers toggle standards, with an audit trail and historical versions; Phase 3 split into three PRs with the
+scope of each), require the eval harness architecture early, and start implementation without merging anything
+until I approve it.
+
+```text
+I approve all three proposals.
+
+1. Challenges: Agree. A successful challenge must not clear or downgrade a violation or change the review verdict. It should mark the finding as "Successfully Challenged" or "Disputed" and be reflected in dashboard metrics. Only an approved, unexpired exception can suppress a violation. Preserve the original finding and challenge outcome for auditability.
+2. Standards enable/disable: Agree. Only approvers can enable or disable standards. Record who made the change and when. Historical reviews must retain the standard version and status applicable when the review was performed.
+3. Phase 3 PRs: Agree with three separate PRs. Suggested split:
+   * PR 1: Foundation, Workers setup, frontend, D1 schema, standards management and deterministic checks.
+   * PR 2: AI review engine, Workflows, LLM integration, evidence verification and challenge workflow.
+   * PR 3: Exceptions, chat, memory, dashboard and evaluation harness.
+
+Please ensure the evaluation harness architecture is established early, even though its full implementation comes in PR 3.
+Keep each PR independently reviewable, with tests and acceptance criteria. Update prompts.md with the exact prompts used throughout.
+Proceed with the agreed implementation plan. Do not merge any PR without my review and approval.
+```
+
+**Outcome:** The design doc was updated with these decisions on the Phase 2 branch. Phase 3 PR 1 (foundation) was
+built on a branch stacked on the design branch, so nothing reached `master` without my approval.

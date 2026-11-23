@@ -1,9 +1,17 @@
 # Phase 2 design
 
-Status: **proposed, awaiting review** (PR `phase-2-design`). Nothing here is built yet.
+Status: **approved with decisions** (prompt 3 in `prompts.md`). Waiting for the PR to be merged.
 
-Decisions already made (prompt 2 in `prompts.md`): no Durable Objects, paste-only input, a demo identity picker
-with enforced approval rules, and a private repo with a branch and PR per phase.
+Decisions made:
+
+- Prompt 2: no Durable Objects, paste-only input, a demo identity picker with enforced approval rules, and a
+  private repo with a branch and PR per phase.
+- Prompt 3:
+  - A successful challenge never clears or downgrades a violation or changes the verdict. The original finding and
+    the challenge outcome are both kept.
+  - Only approvers toggle standards. Each change records who made it and when, and old reviews keep the standard
+    version and status they ran against.
+  - Phase 3 ships as three PRs, with the eval harness architecture in the first one.
 
 Platform facts this design depends on, checked against Cloudflare's docs on 2026-11-23:
 
@@ -19,17 +27,18 @@ Platform facts this design depends on, checked against Cloudflare's docs on 2026
 
 ## 1. Implementation plan
 
-Phase 3 is built in this order. Each step ends with something testable.
+Phase 3 ships as three PRs, as agreed in prompt 3. Each PR can be reviewed on its own and has tests and acceptance
+criteria.
 
-| # | Slice | Done when |
+| PR | Scope | Acceptance criteria |
 |---|---|---|
-| 3.1 | Scaffold: Vite + React + Worker, D1 schema migration, standards YAML loaded into D1, demo users | `wrangler dev` serves the app; `GET /api/standards` returns the seeded standards |
-| 3.2 | Review engine: deterministic rules, LLM detection, evidence verification, classification, verdict (pure modules plus unit tests) | Unit tests pass; a real Llama 3.3 call returns valid findings for one sample |
-| 3.3 | `ReviewWorkflow` with retries, events and status; review submission and results UI | Pasting the sample diff shows live step status and then grouped findings |
-| 3.4 | Accept, reject and challenge findings; exception request and approval, with the identity rules | Policy tests pass; the approval rules are verified through the API with the wrong user and role |
-| 3.5 | Chat about a review | Answers cite this review's findings; chat can't change any state |
-| 3.6 | Dashboard | Numbers match hand-counted D1 rows |
-| 3.7 | Eval harness and first results | `npm run eval` produces a results table for at least 2 configurations |
+| **3-A Foundation** | Worker + Vite/React, D1 schema, standards YAML → D1 with versions and an audit log, approver-only toggle, demo identity, deterministic checks (SEC-001 patterns, TST-001, MNT-001), a rules-only review endpoint and UI, and the **eval harness architecture**: case format, scorer, a runner that scores the rule engine today | Unit tests pass; the smoke script passes against `wrangler dev` (a developer gets 403 on a toggle, an approver's toggle is audited, an old review still shows the standard version and status it ran with); `npm run eval` scores the rule-based cases |
+| **3-B AI review** | `ReviewWorkflow` (steps, retries, events), Llama 3.3 detection in JSON mode, evidence verification, classification, the incomplete verdict, the challenge flow | A real LLM call produces verified findings; an LLM failure becomes `incomplete`, never `pass`; a challenge marks a finding disputed without changing the verdict; the eval runner scores the LLM engine on the LLM cases |
+| **3-C Interaction and insight** | Exceptions with the approval rules, chat, history in prompts, dashboard, the full eval dataset and a comparison across configurations | Policy tests for every approval rule; a test that rejections never suppress a finding; dashboard numbers match D1; `eval/RESULTS.md` with at least 2 configurations |
+
+**Eval harness architecture** (built in 3-A so later PRs plug into it): the engine is a function
+`review(input, ctx) → Finding[]` with a `Detector` interface (`rules` in 3-A, `llm` in 3-B). Cases, the scorer and
+the runner don't change between PRs. Each later PR adds a detector and cases.
 
 ---
 
@@ -94,6 +103,29 @@ CREATE TABLE standards (
   updated_at TEXT NOT NULL
 );
 
+-- Every content version ever seeded, so old reviews can show the exact rule they ran against.
+CREATE TABLE standard_versions (
+  standard_id TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  title TEXT NOT NULL,
+  severity TEXT NOT NULL,
+  detector TEXT NOT NULL,
+  rule TEXT NOT NULL,
+  first_seen_at TEXT NOT NULL,
+  PRIMARY KEY (standard_id, content_hash)
+);
+
+-- Audit log for enable/disable (who and when). Append-only.
+CREATE TABLE standard_changes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  standard_id TEXT NOT NULL REFERENCES standards(id),
+  field TEXT NOT NULL,                 -- 'enabled'
+  old_value TEXT,
+  new_value TEXT,
+  changed_by TEXT NOT NULL REFERENCES users(id),
+  changed_at TEXT NOT NULL
+);
+
 CREATE TABLE reviews (
   id TEXT PRIMARY KEY,                 -- also the Workflow instance id
   author_id TEXT NOT NULL REFERENCES users(id),
@@ -102,7 +134,7 @@ CREATE TABLE reviews (
   status TEXT NOT NULL CHECK (status IN ('queued','running','complete','failed')),
   verdict TEXT CHECK (verdict IN ('pass','warn','fail','incomplete')),
   coverage TEXT,                       -- JSON: {files_total, files_reviewed, skipped:[{file,reason}]}
-  standards_snapshot TEXT NOT NULL,    -- JSON: [{id, content_hash}] for enabled standards at submit time
+  standards_snapshot TEXT NOT NULL,    -- JSON: [{id, content_hash, severity, enabled}] for ALL standards at submit time
   prompt_version TEXT NOT NULL,
   model TEXT NOT NULL,
   error TEXT,
@@ -205,7 +237,7 @@ express them:
 | Exceptions must expire, at most 90 days out | input validation → 400 |
 | **Rejected findings never suppress anything** | the only suppression code path reads `exceptions`; it has no access to `feedback`. A test asserts that a reviewed file with 10 prior rejections for a standard still gets the finding |
 | Challenges never change the verdict | the verdict is computed from `classification`, `severity` and `waived_by_exception` only (see §6) |
-| Enabling or disabling a standard | approvers only (*open question 2*) |
+| Enabling or disabling a standard | approvers only, `policy.ts` → 403; each change appended to `standard_changes` |
 
 ---
 
@@ -308,9 +340,13 @@ evidence matches), classification, waivers and the verdict.
 reasoning}`. Code then sets:
 
 - For `source = rule`, always `upheld`. The LLM only writes the explanation.
-- For `source = llm`, `challenge_outcome = disputed` when the assessment is `not_supported`. That finding counts as a
-  likely false positive on the dashboard and in eval triage, but **the verdict doesn't change**. Clearing it takes
-  an exception. (*Open question 1.*)
+- For `source = llm`, `challenge_outcome = disputed` when the assessment is `not_supported`. The UI labels it
+  "Disputed (challenge succeeded)". It counts as a likely false positive on the dashboard and in eval triage, but
+  **its classification, severity and the verdict don't change** (decided in prompt 3). Only an approved, unexpired
+  exception suppresses a violation.
+- Audit: a finding's original fields are never updated after `persist`. The only fields that change are
+  `disposition`, `challenge_outcome` and `waived_by_exception`, and every action is also appended to `feedback`
+  with the LLM's assessment.
 
 **Chat** (`POST /api/reviews/:id/chat`): the system prompt holds this review's findings, the standards involved
 and any active exceptions, plus the last 10 messages. It's advisory only: it has no tools and can't accept,
@@ -408,12 +444,11 @@ published price.
 
 ---
 
-## Open questions for review
+## Decisions on the open questions (prompt 3)
 
-1. **Challenges:** should an upheld *developer* challenge ever downgrade an LLM-sourced violation to a suggestion,
-   and so change the verdict? This design says **no**: only an approved exception clears a violation, and a
-   successful challenge marks it `disputed` for the dashboard. The trade-off is that a genuine LLM false positive
-   blocks until an approver acts.
-2. **Who can enable or disable standards?** This design says approvers only.
-3. **PR size:** Phase 3 as one PR, or three (3.1–3.3 engine and workflow, 3.4–3.5 interactions, 3.6–3.7 dashboard
-   and eval)? Three are easier to review.
+1. **Challenges:** a successful challenge never clears or downgrades a violation or changes the verdict. It marks
+   the finding disputed, shows in dashboard metrics, and keeps the original finding and the outcome for audit.
+   Trade-off accepted: a real LLM false positive blocks until an approver grants an exception.
+2. **Standards:** approvers only. Every change is recorded in `standard_changes` (who and when), and each review
+   keeps a snapshot of every standard's version and status at submit time.
+3. **PRs:** three, split as in §1.
