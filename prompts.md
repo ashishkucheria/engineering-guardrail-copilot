@@ -373,3 +373,18 @@ Approved, merge both
 retargeting it, so the branch was restored, PR #2 reopened and retargeted to master, then merged. The merged tree
 is identical to the commit CI had passed. This entry is recorded on the 3-B branch, so nothing went to master
 outside a PR.
+
+---
+
+## 7. Starting 3-B
+
+**Intent:** Start PR 3-B (AI review), as planned in the design, after PRs #1 and #2 were merged.
+
+```text
+Start 3-B
+```
+
+**Outcome:** PR 3-B built the review Workflow, Llama 3.3 detection with evidence verification, challenges, per-IP
+rate limits and the daily AI budget. It was tested with unit tests, a smoke test against a fake model, and one real
+eval run. The places where it differs from the design, including budget caps sized for the Workers AI free
+allocation, are listed in section 11 of the design doc. The PR waits for review.

@@ -1,0 +1,17 @@
+{
+  "id": "sec-002-sql-concat",
+  "description": "SQL built by concatenating a request value.",
+  "tags": [
+    "llm"
+  ],
+  "input": "export async function findUser(db, req) {\n  const email = req.query.email;\n  const sql = \"SELECT id, name FROM users WHERE email = '\" + email + \"'\";\n  return db.query(sql);\n}\n",
+  "expected": [
+    {
+      "standard_id": "SEC-002",
+      "lines": [
+        3,
+        4
+      ]
+    }
+  ]
+}

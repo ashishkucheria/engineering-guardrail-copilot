@@ -48,6 +48,15 @@ const KNOWN_TOKENS: { label: string; re: RegExp }[] = [
 const BEARER_LITERAL = /\bBearer\s+([A-Za-z0-9._~+/-]{16,}=*)/g;
 const PRIVATE_KEY = /-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----/;
 
+/**
+ * Whether a literal assigned to a credential-named variable is clearly not a credential: a
+ * placeholder, a URL or path, an env var name, or an interpolation. The rule-based check and the
+ * AI findings (core/llm.ts) use the same definition.
+ */
+export function isNotASecret(value: string): boolean {
+  return PLACEHOLDER.test(value) || NOT_A_SECRET_VALUE.test(value) || value.includes("${");
+}
+
 /** Keep enough of a secret to recognise it, never the whole value. */
 export function redact(value: string): string {
   return value.length <= 8 ? "****" : `${value.slice(0, 4)}…(${value.length} chars)`;
@@ -65,7 +74,7 @@ export function findSecrets(text: string): SecretHit[] {
   for (const m of text.matchAll(SECRET_ASSIGNMENT)) {
     const name = m[1]!;
     const value = m[3]!;
-    if (PLACEHOLDER.test(value) || NOT_A_SECRET_VALUE.test(value) || value.includes("${")) continue; // interpolated, not literal
+    if (isNotASecret(value)) continue;
     const start = m.index + m[0].length - 1 - value.length; // the value sits just before the closing quote
     hits.push({ start, end: start + value.length, explanation: `\`${name}\` is assigned a literal credential.` });
   }
@@ -207,4 +216,18 @@ export const RULES: Readonly<Record<string, RuleFn>> = {
 /** Run every enabled, rule-detected standard that has an implementation. */
 export function runRules(input: ParsedInput, standards: Standard[]): Finding[] {
   return standards.filter((s) => s.enabled && usesRule(s) && RULES[s.id]).flatMap((s) => RULES[s.id]!(input, s));
+}
+
+/**
+ * Redact every secret findSecrets recognises, line by line. Used on AI-written text (evidence and
+ * explanations), which can quote a credential back even when the rule-based check didn't fire.
+ */
+export function redactSecrets(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => {
+      const hits = findSecrets(line);
+      return hits.length ? redactLine(line, hits) : line;
+    })
+    .join("\n");
 }

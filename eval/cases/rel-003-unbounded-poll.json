@@ -1,0 +1,17 @@
+{
+  "id": "rel-003-unbounded-poll",
+  "description": "Polls an external job with no attempt limit or deadline.",
+  "tags": [
+    "llm"
+  ],
+  "input": "export async function waitForJob(api, jobId) {\n  while (!(await api.isDone(jobId))) {\n    await sleep(1000);\n  }\n  return api.result(jobId);\n}\n",
+  "expected": [
+    {
+      "standard_id": "REL-003",
+      "lines": [
+        2,
+        4
+      ]
+    }
+  ]
+}

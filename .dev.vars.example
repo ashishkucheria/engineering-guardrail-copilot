@@ -1,0 +1,11 @@
+# Copy to .dev.vars for local development (.dev.vars is git-ignored). Values override wrangler.jsonc.
+#
+# LLM_MODE:
+#   fake        deterministic stand-in, no AI calls, no cost. Use it for `npm run smoke`.
+#   workers-ai  the real model. Needs `npx wrangler login`; uses your account's Workers AI allocation.
+#   off         no AI; LLM standards are reported as unchecked.
+LLM_MODE=fake
+
+# Needed only for `npm run eval -- --config llm`. Any long random string; the eval runner reads the
+# same value from the EVAL_TOKEN environment variable.
+EVAL_TOKEN=replace-with-a-long-random-string

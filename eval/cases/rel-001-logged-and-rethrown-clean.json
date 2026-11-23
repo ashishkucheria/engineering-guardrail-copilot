@@ -1,0 +1,13 @@
+{
+  "id": "rel-001-logged-and-rethrown-clean",
+  "description": "A catch that logs with context and rethrows.",
+  "tags": [
+    "llm",
+    "clean"
+  ],
+  "input": "export async function save(db, logger, order) {\n  try {\n    await db.insert(order);\n  } catch (err) {\n    logger.error(\"order insert failed\", { orderId: order.id, err });\n    throw err;\n  }\n}\n",
+  "expected": [],
+  "must_not_flag": [
+    "REL-001"
+  ]
+}

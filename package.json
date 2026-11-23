@@ -14,7 +14,9 @@
     "db:setup:local": "npm run db:migrate:local && npm run db:seed:local",
     "smoke": "node scripts/smoke.mjs",
     "eval": "node eval/run.ts",
-    "cf-typegen": "wrangler types"
+    "cf-typegen": "wrangler types --env-file types.env --strict-vars=false",
+    "types:check": "wrangler types --env-file types.env --strict-vars=false --check",
+    "budget:reset:local": "wrangler d1 execute DB --local --command \"DELETE FROM llm_budget\""
   },
   "dependencies": {
     "react": "^19.3.1",

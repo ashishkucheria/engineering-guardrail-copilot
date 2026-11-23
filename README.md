@@ -16,103 +16,129 @@ and every prompt is recorded in [`prompts.md`](prompts.md).
 
 | PR | Scope | State |
 |---|---|---|
-| 3-A Foundation | Worker + React, D1 schema, standards as YAML with versions and an audit log, demo identity, deterministic checks, eval harness architecture | **this PR** |
-| 3-B AI review | Workflows, Llama 3.3 detection, evidence verification, challenges | next |
-| 3-C Interaction and insight | Exceptions, chat, memory, dashboard, full eval | after that |
+| 3-A Foundation | Worker + React, D1 schema, standards as YAML with versions and an audit log, demo identity, deterministic checks, eval harness architecture | merged |
+| 3-B AI review | Workflow pipeline, Llama 3.3 detection, evidence verification, challenges, rate limits and the daily AI budget | **this PR** |
+| 3-C Interaction and insight | Exceptions, chat, memory, dashboard, full eval | next |
 
-What works in 3-A (tested; see below):
+What works (tested; see below):
 
-- Paste a snippet or unified diff and get a review from the **deterministic checks**. The AI review is **not**
-  in this PR.
-  - **SEC-001 hardcoded secrets.** Credential-named literals plus well-known token formats (Stripe, GitHub,
-    Slack, Google API, AWS, literal bearer tokens, private keys). Each secret is its own finding, and every secret
-    on the line is redacted in the evidence.
-  - **MNT-001** TODOs without a ticket.
-  - **TST-001** new logic without tests (diffs only).
-- Findings show severity, standard, file and line (new-file line numbers for diffs), evidence, why, impact and fix.
-- The verdict is computed in code: fail on any blocker; `incomplete`, never pass, if any file couldn't be read;
-  warn on other violations; otherwise pass.
-- Standards live in `standards/*.yaml`. Approvers can enable or disable them. Every change is audited with who and
-  when, and concurrent toggles can't double-write. Every review keeps a snapshot of every standard's version and
-  status, so history isn't rewritten. Removing a YAML file **retires** the standard: it stops running and can't
-  be toggled, but its history stays.
+- Paste a snippet or unified diff. The review runs in a **Cloudflare Workflow**, one step at a time:
+  load the standards snapshot, validate, deterministic rules, one **Llama 3.3** call per code chunk, then save. The
+  UI shows each step as it finishes.
+- **Deterministic checks:** SEC-001 hardcoded secrets (credential-named literals and known token formats, each
+  secret its own finding, all redacted), MNT-001 TODOs without a ticket, TST-001 new logic without tests (diffs
+  only).
+- **AI checks** for SEC-001, SEC-002 (SQL from unescaped input), REL-001/002/003 and OBS-001, in JSON mode. Code,
+  not the model, decides everything that matters:
+  - **Evidence verification:** a finding is kept only if its quote is in the input; the line numbers come from
+    where it matches. Unmatched quotes are dropped and counted in the pipeline log.
+  - Severity comes from the standard. A finding is a violation only if the model says "definite" and the quote is
+    on a line the change adds. A finding on unchanged diff lines is a **pre-existing** suggestion and can't fail
+    the change.
+  - Secrets the model quotes are redacted, and an AI "secret" whose value is a placeholder (`<your-key>`, `****`)
+    is dropped, by the same definition the rule uses.
+  - Detection never sees feedback history, and the prompt treats code as data (prompt-injection case in the eval).
+- **Failure is visible, never a silent pass.** A chunk the model can't answer after 3 retries becomes a coverage
+  gap and the verdict is `incomplete` (still `fail` if a rule found a blocker). Large files are chunked (8,000
+  characters, 15 lines of overlap, at most 40 chunks), never truncated. At most 200 findings are kept per review;
+  the rest are recorded as a gap.
+- **Challenges:** "Challenge this finding" sends your argument, the standard and the surrounding code to the model.
+  An AI finding it agrees is wrong is marked **Disputed**, but its classification, severity and the verdict never
+  change (only an approved exception will waive a violation, in 3-C). A rule finding is always upheld. One
+  challenge per finding, recorded with who, why and the model's reasoning.
+- **Cost protection** (design §10): per-IP rate limits (5 reviews and 10 challenges a minute) and a strict daily cap
+  on AI calls in D1. Once the cap is reached, reviews still run the deterministic checks and are marked
+  `incomplete`, and challenges get `429` with `Retry-After`.
+- Standards live in `standards/*.yaml`. Approvers can enable or disable them, every change is audited, and every
+  review keeps a snapshot of the version and status of every standard it ran with.
 
 ## Run it locally
 
-Needs Node 22.18+ (it runs TypeScript scripts directly) and npm. No Cloudflare account is needed for 3-A: D1 runs
-locally.
+Needs Node 22.18+ (it runs TypeScript scripts directly) and npm.
 
 ```sh
 npm install
-npm run db:setup:local   # apply migrations to the local D1 and seed standards + demo users
-npm run dev              # http://localhost:5173
+cp .dev.vars.example .dev.vars   # LLM_MODE=fake by default: no AI calls, no Cloudflare account needed
+npm run db:setup:local           # apply migrations to the local D1 and seed standards + demo users
+npm run dev                      # http://localhost:5173
 ```
 
-Re-run `npm run db:seed:local` after editing `standards/*.yaml`. Seeding updates content, adds a new version
-(rule text and examples), keeps each standard's enabled flag and audit trail, and retires standards whose file
-was removed. After pulling new migrations, run `npm run db:migrate:local`.
+To use the real model, set `LLM_MODE=workers-ai` in `.dev.vars` and run `npx wrangler login` first. Workers AI
+always runs remotely, also in local dev, and uses your account's Workers AI allocation (10,000 neurons a day free;
+one review chunk is roughly 250 neurons). `LLM_MODE=off` runs the deterministic checks only.
+
+Other local commands: `npm run db:seed:local` after editing `standards/*.yaml`; `npm run db:migrate:local` after
+pulling new migrations; `npm run budget:reset:local` to reset today's local AI budget.
 
 ## Tests
 
 ```sh
-npm test            # unit tests: diff parsing, rules, verdict, policy, standards, eval scorer
+npm test            # unit tests: diff parsing, rules, chunking, verification, LLM detector, verdict, budget, scorer
 npm run typecheck   # client, worker and node projects
-npm run smoke       # end-to-end API checks against a running `npm run dev` (changes local data)
+npm run smoke       # end-to-end API checks against `npm run dev` with LLM_MODE=fake (changes local data)
 npm run eval        # eval harness: scores the engine against labelled cases in eval/cases
 ```
 
-CI (`.github/workflows/ci.yml`) runs all of these on every PR: generated Worker types are up to date, typecheck,
-unit tests, the rules eval in `--strict` mode (any miss fails), build, and the smoke test against a local
-server.
+CI (`.github/workflows/ci.yml`) runs all of these on every PR with no Cloudflare account: generated Worker types
+are up to date, typecheck, unit tests, the rules eval in `--strict` mode, build, and the smoke test against a
+local server running the fake model (`LOCAL_ONLY=1` turns off remote bindings).
 
-The smoke test covers the PR's acceptance criteria:
+The fake model (`worker/ai.ts`) recognises a few patterns, invents one quote that isn't in the code, and can be
+told to fail. The smoke test uses it to check the whole pipeline without AI calls:
 
-- A developer gets 403 on a toggle, and nothing is audited.
-- An approver's toggle is audited with who and when.
-- A disabled standard doesn't run.
-- An old review still shows the version and status it ran with.
-- Input validation errors (400, 413), unknown routes (404) and wrong methods (405).
-- Regressions from the PR review: every secret on a line redacted, `$&` in a secret, a 99 KB input accepted,
-  a malformed URL gets 400, and concurrent toggles write one audit row.
+- An AI review through the Workflow: verified findings with lines, a hallucinated quote dropped, every step logged.
+- An AI failure after retries is `incomplete`, and a rule blocker still fails.
+- An AI finding on an unchanged diff line is a pre-existing suggestion.
+- Challenges: disputed without changing the verdict, once per finding, rule findings always upheld.
+- The 6th review request in a minute from one IP gets `429`. Once the daily budget is used up, reviews run rules
+  only and challenges get `429` with `Retry-After`.
+- Everything from 3-A: 401/403/404/405/413, audited toggles, snapshots, redaction regressions.
 
 ## Eval harness
 
-`eval/cases/*.json` are hand-labelled inputs: expected findings (standard and line range), plus
-`must_not_flag` for areas that look risky but comply. `npm run eval -- --config <name>` runs every case through
-the same `review()` the Worker uses and reports precision, recall and F1 per standard, false positives on clean
-cases, and `must_not_flag` failures. Add `--save` to write `eval/results/<date>-<config>.json`.
+`eval/cases/*.json` are hand-labelled inputs: expected findings (standard and line range), `must_not_flag` for
+areas that look risky but comply, and `hard_gate` for cases that fail the whole run if missed (the two
+prompt-injection cases). `npm run eval -- --config <name>` runs every case through the same `review()` and
+detectors as the app and reports precision, recall and F1 per standard, false positives on clean cases,
+**blocker precision** on its own line, and the hard gates. `--save` writes `eval/results/<date>-<config>.json`.
 
-Each config only scores the standards it can detect. The `rules` config scores SEC-001, MNT-001 and TST-001. The
-cases already include LLM-standard labels (REL-001, REL-002, and a prompt-injection case) for the AI configs that
-PR 3-B adds.
+- `rules`: deterministic checks only, no network. CI runs it in `--strict` mode.
+- `llm`: rules plus the real model, through `POST /api/eval/detect` on a running app (`--target`, default
+  `http://localhost:5173`). The endpoint needs the `EVAL_TOKEN` secret (from `.dev.vars` locally) and spends the
+  separate eval budget, one call per case.
 
-Today the rules config scores 100% on its 11 labelled findings. That's expected and doesn't mean much: the cases
-were written alongside the rules. The harness matters for comparing AI prompts and models, where results vary.
+First real run (22 cases, Llama 3.3 70B, prompt v2, [`eval/results/2026-11-23-llm-run1.json`](eval/results/2026-11-23-llm-run1.json)):
+recall 100% (17/17), precision 85%, both hard gates passed, **blocker precision 80%**. The two false blockers were
+AI "secrets" that were placeholders. The placeholder guard above fixed that case in a single re-run, but the full
+suite hasn't been re-run since. One OBS-001 false positive (a password literal flagged as "logging a secret")
+remains. A single run at temperature 0 says nothing about run-to-run variance; that's part of 3-C.
 
 ## Layout
 
 ```
-core/        pure domain logic: diff parsing, rules, engine, verdict, policy (no bindings, unit-tested)
-worker/      the API Worker: routing, demo identity, D1 queries
+core/        pure domain logic: diff parsing, chunking, rules, prompts, LLM detector, engine, verdict, policy
+worker/      the API Worker: routing, demo identity, D1 queries, the review Workflow, AI clients, budget
 client/      React UI
 standards/   the engineering standards, one YAML file each
 migrations/  D1 schema
-eval/        eval cases, scorer, runner
+eval/        eval cases, scorer, runner, saved results
 scripts/     seed generator, standards loader, API smoke test
 test/        unit tests (Vitest)
 docs/        design
 ```
 
-## Known limits (3-A)
+## Known limits (3-B)
 
 - Demo identity only (see the top of this file).
-- The submitted input is stored as is, including any secret it contains. Only the finding's evidence is
-  redacted.
-- TST-001 is satisfied by *any* test file in the diff, not necessarily one for the changed code.
-- Secret detection uses patterns. It catches credential-named literals and the token formats listed above, not
-  every secret format. A literal under a neutral name (`const k = "…"`) in an unknown format isn't caught.
-- MNT-001 treats `ABC-123` as a ticket unless the key is a known technical prefix (SHA, UTF, ISO, RFC, CVE, …).
-  The list is fixed in code, not configurable per team.
-- Any demo user can read any review (`GET /api/reviews/:id`). Combined with stored inputs, this matters before
-  any public deploy (see the open decision in `docs/phase-2-design.md`).
-- No cap on findings per review yet (planned for 3-B).
+- The submitted input is stored as is, including any secret it contains. Findings, AI explanations and challenge
+  reasoning are redacted; the input isn't.
+- Any demo user can read any review. With stored inputs, the demo must not be used with real secrets.
+- One abuser can use up the day's AI budget for everyone. The demo then runs deterministic checks only; it never
+  becomes an unbounded bill. Per-IP limits can be dodged with many IPs; the global budget still holds.
+- The free Workers AI allocation (about 40 calls a day) is shared by the app, local development and the eval. The
+  budgets (`DAILY_LLM_CALLS_APP=20`, `DAILY_LLM_CALLS_EVAL=25` in `wrangler.jsonc`) are sized for it.
+- AI verification checks that the quote exists, not that the model's reasoning is right. A real line can still be
+  wrongly flagged; that's what challenges and the eval's blocker precision are for.
+- TST-001 is satisfied by *any* test file in the diff. Secret detection uses patterns, not every format. The
+  MNT-001 list of technical prefixes is fixed in code.
+- Exceptions (the only thing that can waive a violation), accept/reject feedback, chat and the dashboard are 3-C.

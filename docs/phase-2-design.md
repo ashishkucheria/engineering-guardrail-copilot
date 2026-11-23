@@ -566,3 +566,26 @@ shows today's budget use.
 
 Durable Objects stay out (prompt 2): D1's single writer gives the strict counter, and the binding gives burst
 limits.
+
+---
+
+## 11. Implementation notes from PR 3-B
+
+Where the build differs from the design above, and why. Each item is called out in the PR for review.
+
+| # | Design | Built | Why |
+|---|---|---|---|
+| 1 | Budget defaults 1,500 app / 1,000 eval calls a day | **20 app / 25 eval** | The account is on the Workers AI free allocation (10,000 neurons a day, about 40 calls). Over that, calls fail instead of costing money; the caps keep the app, local development and the eval inside it. Change the vars for a paid account. |
+| 2 | A review reserves `chunks + 1` calls | Reserves `chunks` | Nothing in the pipeline uses the extra call. With about 40 calls a day it's a real share of the budget. |
+| 3 | Every chunk goes to the model | A chunk with no added line isn't sent | Unchanged context can only give pre-existing suggestions, so it costs a call and can't change the verdict. Nothing the change adds goes unread. |
+| 4 | `verify` is a separate step | Verification runs inside each `detect` step | It's pure and deterministic, so it doesn't need its own retry; the step's event records what was dropped. |
+| 5 | `apply-exceptions` step | Not yet | There's no exceptions table until 3-C, which adds the step. |
+| 6 | Eval calls `POST /api/eval/review` | `POST /api/eval/detect` runs only the AI detector; the runner adds the rules locally | Rules don't need the network, and the runner then uses the exact same `review()` as the unit tests. |
+| 7 | Challenges | One challenge per finding (`409` after that) | Keeps the audit simple: one outcome per finding. Easy to relax in 3-C if you want re-challenges. |
+| 8 | — | `LLM_MODE=fake`: a deterministic stand-in model, and `LOCAL_ONLY=1` to turn off remote bindings | CI has no Cloudflare account, and the smoke test should cost nothing. The fake model also exercises verification (it invents one quote) and failures. The fake model counts against the budget like the real one, so the budget path is tested too. |
+| 9 | — | AI SEC-001 findings whose quoted values are all placeholders are dropped | The first real eval run flagged `"<your-key-here>"` and `"****"` as secrets: two false blockers. The rule already defines placeholders; the AI path now uses the same definition. |
+
+**Open for 3-C: the eval plan doesn't fit the free allocation.** §8 plans 4 configurations × 3 runs × about 24
+cases, roughly 300 calls, and one full `llm` run already uses 22 of the day's 40 or so. Options: spread the runs
+over several days; run the `small` config on Llama 3.1 8B (about a sixth of the neurons per call); cut to 2
+configurations × 3 runs; or use a paid account for the eval. This needs a decision before 3-C.

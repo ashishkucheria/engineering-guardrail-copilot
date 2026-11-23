@@ -1,0 +1,17 @@
+{
+  "id": "obs-001-logs-auth-header",
+  "description": "Logs the Authorization header.",
+  "tags": [
+    "llm"
+  ],
+  "input": "export function handle(req) {\n  console.log(\"incoming request\", req.url, req.headers.get(\"authorization\"));\n  return route(req);\n}\n",
+  "expected": [
+    {
+      "standard_id": "OBS-001",
+      "lines": [
+        2,
+        2
+      ]
+    }
+  ]
+}

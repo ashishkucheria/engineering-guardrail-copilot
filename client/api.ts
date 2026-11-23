@@ -1,9 +1,9 @@
 // Typed client for the Worker API. The response types are the Worker's own types, so a contract
 // change breaks the build instead of the page.
-import type { FindingView, ReviewDetail, ReviewSummary, StandardChange, StandardView } from "../core/api-types.ts";
+import type { ChallengeResult, FindingView, MetaView, ReviewDetail, ReviewSummary, StandardChange, StandardView } from "../core/api-types.ts";
 import type { User } from "../core/types.ts";
 
-export type { FindingView, ReviewDetail, ReviewSummary, StandardChange, StandardView, User };
+export type { ChallengeResult, FindingView, MetaView, ReviewDetail, ReviewSummary, StandardChange, StandardView, User };
 
 export class ApiFailure extends Error {
   readonly status: number;
@@ -40,7 +40,9 @@ export const api = {
   standards: () => call<StandardView[]>("GET", "/api/standards"),
   standardChanges: (id: string) => call<StandardChange[]>("GET", `/api/standards/${encodeURIComponent(id)}/changes`),
   setStandardEnabled: (id: string, enabled: boolean) => call<StandardView>("PATCH", `/api/standards/${encodeURIComponent(id)}`, { enabled }),
-  createReview: (input: string) => call<ReviewDetail>("POST", "/api/reviews", { input }),
+  meta: () => call<MetaView>("GET", "/api/meta"),
+  createReview: (input: string) => call<{ id: string; status: string }>("POST", "/api/reviews", { input }),
+  challenge: (findingId: string, argument: string) => call<ChallengeResult>("POST", `/api/findings/${encodeURIComponent(findingId)}/challenge`, { argument }),
   reviews: () => call<ReviewSummary[]>("GET", "/api/reviews"),
   review: (id: string) => call<ReviewDetail>("GET", `/api/reviews/${encodeURIComponent(id)}`),
 };

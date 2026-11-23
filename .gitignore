@@ -10,3 +10,5 @@ dist/
 eval/results/raw/
 .claude/
 node_modules/.tmp/
+
+!.dev.vars.example

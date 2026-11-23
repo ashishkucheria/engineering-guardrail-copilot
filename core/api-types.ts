@@ -41,9 +41,35 @@ export interface SnapshotEntry extends StandardSnapshot {
   changedSince: { content: boolean; enabled: boolean };
 }
 
+export interface ChallengeView {
+  by: Ref;
+  argument: string;
+  /** The model's assessment, as given. For rule findings the outcome is "upheld" whatever it says. */
+  assessment: string | null;
+  reasoning: string | null;
+  at: string;
+}
+
 export interface FindingView extends Finding {
   id: string;
   standardTitle: string | null;
+  preExisting: boolean;
+  /** "disputed" marks a likely false positive. It never changes classification, severity or the verdict. */
+  challengeOutcome: "upheld" | "disputed" | null;
+  challenge: ChallengeView | null;
+}
+
+export interface ChallengeResult {
+  assessment: "upheld" | "not_supported";
+  reasoning: string;
+  finding: FindingView;
+}
+
+export interface MetaView {
+  llmMode: "workers-ai" | "fake" | "off";
+  model: string | null;
+  promptVersion: string;
+  budget: { day: string; app: { used: number; limit: number }; eval: { used: number; limit: number } };
 }
 
 export interface ReviewEvent {
@@ -63,6 +89,8 @@ export interface ReviewDetail {
   verdict: Verdict | null;
   coverage: Coverage | null;
   engine: string;
+  promptVersion: string | null;
+  model: string | null;
   createdAt: string;
   completedAt: string | null;
   error: string | null;
