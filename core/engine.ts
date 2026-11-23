@@ -48,14 +48,22 @@ export async function review(raw: string, standards: Standard[], detectors: Dete
 
 /**
  * Same standard, same file, overlapping lines → one finding. A rule finding wins over an LLM one
- * (it is deterministic), then a violation over a suggestion.
+ * (it is deterministic), then a violation over a suggestion. Rule findings are never merged with
+ * each other: a rule reports each distinct hit (e.g. two secrets on one line) on purpose.
  */
 export function dedupe(findings: Finding[]): Finding[] {
   const rank = (f: Finding) => (f.source === "rule" ? 0 : 2) + (f.classification === "violation" ? 0 : 1);
   const sorted = [...findings].sort((a, b) => rank(a) - rank(b));
   const kept: Finding[] = [];
   for (const f of sorted) {
-    const dup = kept.some((k) => k.standardId === f.standardId && k.file === f.file && k.lineStart <= f.lineEnd && f.lineStart <= k.lineEnd);
+    const dup = kept.some(
+      (k) =>
+        !(k.source === "rule" && f.source === "rule") &&
+        k.standardId === f.standardId &&
+        k.file === f.file &&
+        k.lineStart <= f.lineEnd &&
+        f.lineStart <= k.lineEnd,
+    );
     if (!dup) kept.push(f);
   }
   return kept;

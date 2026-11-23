@@ -10,6 +10,8 @@ export interface StandardView extends Standard {
   /** Last person to enable/disable it. Null if never changed since seeding. */
   updatedBy: Ref | null;
   updatedAt: string;
+  /** Set when the standard's YAML file was removed. A retired standard never runs and can't be toggled. */
+  retiredAt: string | null;
 }
 
 export interface StandardChange {

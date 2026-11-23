@@ -35,6 +35,9 @@ describe("dedupe", () => {
     expect(out).toHaveLength(1);
     expect(out[0]!.source).toBe("rule");
   });
+  it("never merges two rule findings (e.g. two secrets on one line)", () => {
+    expect(dedupe([f({ explanation: "a" }), f({ explanation: "b" })])).toHaveLength(2);
+  });
   it("keeps findings on different lines, files or standards", () => {
     expect(dedupe([f({}), f({ lineStart: 9, lineEnd: 9 }), f({ file: "b.ts" }), f({ standardId: "MNT-001" })])).toHaveLength(4);
   });

@@ -1,7 +1,9 @@
-// Eval runner: `npm run eval -- --config rules [--save]`
+// Eval runner: `npm run eval -- --config rules [--save] [--strict]`
 //
 // Runs every case in eval/cases through the same review() the Worker uses, scores the result
 // against the labels, prints a table, and with --save writes eval/results/<date>-<config>.json.
+// --strict exits non-zero on any false positive, miss or must_not_flag failure (used in CI for the
+// deterministic rules config; LLM configs are compared on scores instead).
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,6 +18,7 @@ const { values } = parseArgs({
     config: { type: "string", default: "rules" },
     case: { type: "string" },
     save: { type: "boolean", default: false },
+    strict: { type: "boolean", default: false },
   },
 });
 
@@ -79,6 +82,11 @@ if (values.save) {
     ) + "\n",
   );
   console.log(`Saved ${file}`);
+}
+
+if (values.strict && (summary.overall.fp > 0 || summary.overall.fn > 0 || summary.mustNotFlagFailures.length > 0)) {
+  console.error("Strict mode: the eval has false positives, misses or must_not_flag failures.");
+  process.exit(1);
 }
 
 function validateCase(raw: unknown, file: string): EvalCase {

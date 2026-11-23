@@ -131,6 +131,48 @@ await check("unknown routes and standards are 404; wrong methods are 405", async
   assert((await api("DELETE", "/api/reviews", { user: DEV })).status === 405, "wrong method");
 });
 
+// --- Regressions from the review of PR #2 (prompt 4) -----------------------------------------
+
+await check("review: every secret on a line is reported and redacted, through the API", async () => {
+  const input = '{ user: "svc", password: "hunter2hunter2", clientSecret: "zzzzzzzz9999" }';
+  const r = await api("POST", "/api/reviews", { user: DEV, body: { input } });
+  assert(r.status === 201, `status ${r.status}`);
+  const sec = r.data.findings.filter((f) => f.standardId === "SEC-001");
+  assert(sec.length === 2, `expected 2 SEC-001 findings, got ${sec.length}`);
+  const body = JSON.stringify(r.data.findings);
+  assert(!body.includes("hunter2hunter2") && !body.includes("zzzzzzzz9999"), "a secret leaked into the findings");
+});
+
+await check("review: a $& secret is not re-inserted by redaction", async () => {
+  const r = await api("POST", "/api/reviews", { user: DEV, body: { input: 'const apiKey = "$&abcdefghij";' } });
+  assert(r.status === 201 && r.data.findings.length === 1, `got ${r.status} / ${r.data.findings?.length}`);
+  assert(!JSON.stringify(r.data.findings).includes("abcdefghij"), "secret leaked");
+});
+
+await check("review: an input just under 100 KB is accepted even though its JSON body is larger", async () => {
+  const line = 'const s = "a \\"quoted\\" value\\twith escapes";\n'; // escapes inflate the JSON body
+  const input = line.repeat(Math.floor(99_000 / line.length));
+  assert(Buffer.byteLength(input) < 100_000, "test input too big");
+  assert(Buffer.byteLength(JSON.stringify({ input })) > 101_000, "test body should exceed the old cap");
+  const r = await api("POST", "/api/reviews", { user: DEV, body: { input } });
+  assert(r.status === 201, `status ${r.status} ${JSON.stringify(r.data?.error)}`);
+});
+
+await check("review: a malformed percent-escape is a 400, not a 500", async () => {
+  const r = await api("GET", "/api/reviews/%E0%A4%A", { user: DEV });
+  assert(r.status === 400 && r.data.error.code === "invalid_path", `got ${r.status} ${JSON.stringify(r.data)}`);
+});
+
+await check("review: concurrent identical toggles write one change and one audit row", async () => {
+  const before = (await api("GET", "/api/standards/MNT-001/changes", { user: DEV })).data.length;
+  const results = await Promise.all(Array.from({ length: 6 }, () => api("PATCH", "/api/standards/MNT-001", { user: APPROVER, body: { enabled: false } })));
+  assert(results.every((r) => r.status === 200 && r.data.enabled === false), "all requests should succeed and report disabled");
+  const log = (await api("GET", "/api/standards/MNT-001/changes", { user: DEV })).data;
+  assert(log.length === before + 1, `expected exactly 1 new audit row, got ${log.length - before}`);
+  assert(log[0].oldValue === "true" && log[0].newValue === "false", `audit row ${JSON.stringify(log[0])}`);
+  await api("PATCH", "/api/standards/MNT-001", { user: APPROVER, body: { enabled: true } });
+});
+
 await check("history lists the reviews, newest first", async () => {
   const r = await api("GET", "/api/reviews", { user: DEV });
   assert(r.status === 200 && r.data.length >= 2, `got ${r.data?.length}`);

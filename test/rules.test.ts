@@ -30,6 +30,7 @@ describe("SEC-001 hardcoded secrets", () => {
       'const tokenUrl = "https://auth.example.com/oauth/token";',
       'const tokenName = "PAYMENTS_TOKEN";',
       'const password = "short";',
+      "const apiKey = `${prefix}-${env.SUFFIX}`;",
     ];
     for (const line of clean) expect(only(line, "SEC-001"), line).toHaveLength(0);
   });
@@ -37,6 +38,60 @@ describe("SEC-001 hardcoded secrets", () => {
   it("only checks lines the diff adds", () => {
     const d = diff("--- a/a.ts", "+++ b/a.ts", "@@ -1,2 +1,2 @@", ' const token = "old-context-value-123456";', "-x", "+y");
     expect(only(d, "SEC-001")).toHaveLength(0);
+  });
+
+  it("reports and redacts EVERY secret on a line (review: second secret leaked in plain text)", () => {
+    const line = '{ user: "svc", password: "hunter2hunter2", clientSecret: "zzzzzzzz9999" }';
+    const found = only(line, "SEC-001");
+    expect(found).toHaveLength(2);
+    expect(found.map((f) => f.explanation)).toEqual([
+      "`password` is assigned a literal credential.",
+      "`clientSecret` is assigned a literal credential.",
+    ]);
+    for (const f of found) {
+      expect(f.evidence).not.toContain("hunter2hunter2");
+      expect(f.evidence).not.toContain("zzzzzzzz9999");
+      expect(f.evidence).toBe('{ user: "svc", password: "hunt…(14 chars)", clientSecret: "zzzz…(12 chars)" }');
+    }
+  });
+
+  it("does not re-insert a secret that contains $ replacement patterns (review: $& leak)", () => {
+    for (const value of ["$&abcdefghij", "$'abcdefghij", "$`abcdefghij", "$1abcdefghij"]) {
+      // A backtick can't sit inside a backtick-quoted literal; double quotes work for all four.
+      const [f] = only(`const apiKey = "${value}";`, "SEC-001");
+      expect(f, value).toBeDefined();
+      expect(f!.evidence, value).not.toContain(value);
+      expect(f!.evidence, value).not.toContain("abcdefghij");
+    }
+  });
+
+  it("detects well-known token formats whatever the variable is called (review: sk_live_ passed)", () => {
+    // Assembled at runtime so this file never contains a string in a real provider's key format.
+    const j = (...p: string[]) => p.join("");
+    const tokens = [
+      j("sk", "_live_", "51H", "abcdefghijklmnopqrstuvwx"),
+      j("gh", "p_", "abcdefghijklmnopqrstuvwxyz0123456789"),
+      j("xo", "xb-", "1234567890-abcdefghij"),
+      j("AI", "za", "SyA-abcdefghijklmnopqrstuvwxyz012345"),
+      j("AK", "IA", "ABCDEFGHIJKLMNOP"),
+    ];
+    for (const t of tokens) {
+      const [f] = only(`const key = "${t}";`, "SEC-001");
+      expect(f, t).toBeDefined();
+      expect(f!.evidence, t).not.toContain(t.slice(6));
+    }
+    const bearer = j("Bearer ", "eyJhbGciOiJIUzI1NiJ9.abcdefgh");
+    expect(only(`headers: { Authorization: "${bearer}" }`, "SEC-001")).toHaveLength(1);
+  });
+
+  it("does not flag a bearer header built from a variable", () => {
+    expect(only("headers: { authorization: `Bearer ${apiKey}` },", "SEC-001")).toHaveLength(0);
+    expect(only('headers: { authorization: "Bearer " + token },', "SEC-001")).toHaveLength(0);
+  });
+
+  it("reports a Stripe key assigned to a credential name once, not twice", () => {
+    const key = ["sk", "_test_", "abcdefghijklmnopqrstuvwx"].join("");
+    expect(only(`const apiKey = "${key}";`, "SEC-001")).toHaveLength(1);
   });
 
   it("redact never returns the whole value", () => {
@@ -53,6 +108,13 @@ describe("MNT-001 TODOs need a ticket", () => {
 
   it("accepts ticket ids, issue numbers and links", () => {
     for (const line of ["// TODO(PAY-412): x", "// TODO #88 x", "// TODO see https://tracker/1"]) expect(only(line, "MNT-001"), line).toHaveLength(0);
+  });
+
+  it("doesn't mistake technical identifiers for tickets (review: SHA-256 passed)", () => {
+    for (const line of ["// TODO: switch to SHA-256", "// TODO: force UTF-8", "// FIXME: ISO-8601 dates", "// TODO: patch CVE-2024-1234"]) {
+      expect(only(line, "MNT-001"), line).toHaveLength(1);
+    }
+    expect(only("// TODO(PAY-12): switch to SHA-256", "MNT-001")).toHaveLength(0);
   });
 
   it("ignores TODO outside comments", () => {

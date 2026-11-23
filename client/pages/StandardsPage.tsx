@@ -60,8 +60,8 @@ export function StandardsPage({ user }: { user: User }) {
                   <td><code>{s.contentHash.slice(0, 8)}</code></td>
                   <td onClick={(e) => e.stopPropagation()}>
                     <label className={`switch ${canEdit ? "" : "locked"}`} title={canEdit ? "" : "Approvers only"}>
-                      <input type="checkbox" checked={s.enabled} disabled={!canEdit || busy === s.id} onChange={() => toggle(s)} />
-                      <span>{s.enabled ? "enabled" : "disabled"}</span>
+                      <input type="checkbox" checked={s.enabled && !s.retiredAt} disabled={!canEdit || !!s.retiredAt || busy === s.id} onChange={() => toggle(s)} />
+                      <span>{s.retiredAt ? "retired" : s.enabled ? "enabled" : "disabled"}</span>
                     </label>
                   </td>
                   <td className="muted small">{s.updatedBy ? `${s.updatedBy.name}, ${new Date(s.updatedAt).toLocaleString()}` : "never changed"}</td>

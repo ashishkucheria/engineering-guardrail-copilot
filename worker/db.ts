@@ -17,6 +17,7 @@ interface StandardRow {
   updated_by: string | null;
   updated_by_name: string | null;
   updated_at: string;
+  retired_at: string | null;
 }
 
 
@@ -32,7 +33,13 @@ const toStandard = (r: StandardRow): StandardView => ({
   enabled: r.enabled === 1,
   updatedBy: r.updated_by ? { id: r.updated_by, name: r.updated_by_name ?? r.updated_by } : null,
   updatedAt: r.updated_at,
+  retiredAt: r.retired_at,
 });
+
+/** What actually runs: a retired standard counts as disabled, whatever its stored flag says. */
+export function effective(s: StandardView): StandardView {
+  return s.retiredAt ? { ...s, enabled: false } : s;
+}
 
 const STANDARD_SELECT = `SELECT s.*, u.name AS updated_by_name FROM standards s LEFT JOIN users u ON u.id = s.updated_by`;
 
@@ -53,14 +60,26 @@ export async function getStandard(db: D1Database, id: string): Promise<StandardV
   return r ? toStandard(r) : null;
 }
 
-/** Change `enabled` and append the audit row in one transaction. */
-export async function setStandardEnabled(db: D1Database, id: string, enabled: boolean, by: string, at: string): Promise<void> {
-  await db.batch([
-    db.prepare("UPDATE standards SET enabled = ?, updated_by = ?, updated_at = ? WHERE id = ?").bind(enabled ? 1 : 0, by, at, id),
+/**
+ * Change `enabled` and append the audit row in one transaction, but only if the standard is
+ * currently in the opposite state. The UPDATE is conditional on the old value, and the audit row
+ * is inserted only if that UPDATE changed a row (`changes()` in the same transaction). So two
+ * concurrent toggles in the same direction produce one change and one audit row, with the right
+ * old value. Returns whether this call made the change.
+ */
+export async function setStandardEnabled(db: D1Database, id: string, enabled: boolean, by: string, at: string): Promise<boolean> {
+  const [update] = await db.batch([
     db
-      .prepare("INSERT INTO standard_changes (standard_id, field, old_value, new_value, changed_by, changed_at) VALUES (?, 'enabled', ?, ?, ?, ?)")
+      .prepare("UPDATE standards SET enabled = ?, updated_by = ?, updated_at = ? WHERE id = ? AND enabled = ? AND retired_at IS NULL")
+      .bind(enabled ? 1 : 0, by, at, id, enabled ? 0 : 1),
+    db
+      .prepare(
+        `INSERT INTO standard_changes (standard_id, field, old_value, new_value, changed_by, changed_at)
+         SELECT ?, 'enabled', ?, ?, ?, ? WHERE changes() = 1`,
+      )
       .bind(id, String(!enabled), String(enabled), by, at),
   ]);
+  return (update?.meta.changes ?? 0) === 1;
 }
 
 
@@ -100,31 +119,44 @@ export interface NewReview {
   events: { step: string; outcome: "ok" | "retry" | "failed" | "skipped"; durationMs: number; detail?: string }[];
 }
 
-/** Review, findings and events in one transaction: a review is never visible half-written. */
+/** Stable finding id: the same review persisted twice yields the same ids (see INSERT OR IGNORE). */
+export function findingId(reviewId: string, index: number): string {
+  return `${reviewId}:${String(index).padStart(4, "0")}`;
+}
+
+/**
+ * Review, findings and events in one transaction: a review is never visible half-written.
+ * Idempotent for retries: the review and its findings use deterministic keys and INSERT OR IGNORE,
+ * so re-running after a lost response can't duplicate findings.
+ */
 export async function insertCompletedReview(db: D1Database, r: NewReview): Promise<void> {
   const stmts: D1PreparedStatement[] = [
     db
       .prepare(
-        `INSERT INTO reviews (id, author_id, input_kind, input_text, status, verdict, coverage, standards_snapshot, engine, created_at, completed_at)
+        `INSERT OR IGNORE INTO reviews (id, author_id, input_kind, input_text, status, verdict, coverage, standards_snapshot, engine, created_at, completed_at)
          VALUES (?, ?, ?, ?, 'complete', ?, ?, ?, ?, ?, ?)`,
       )
       .bind(r.id, r.authorId, r.inputKind, r.inputText, r.verdict, JSON.stringify(r.coverage), JSON.stringify(r.snapshot), r.engine, r.createdAt, r.completedAt),
   ];
-  for (const f of r.findings) {
+  for (const [i, f] of r.findings.entries()) {
     stmts.push(
       db
         .prepare(
-          `INSERT INTO findings (id, review_id, standard_id, standard_hash, classification, severity, source, file, line_start, line_end, evidence, explanation, impact, remediation, created_at)
+          `INSERT OR IGNORE INTO findings (id, review_id, standard_id, standard_hash, classification, severity, source, file, line_start, line_end, evidence, explanation, impact, remediation, created_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
-        .bind(crypto.randomUUID(), r.id, f.standardId, f.standardHash, f.classification, f.severity, f.source, f.file, f.lineStart, f.lineEnd, f.evidence, f.explanation, f.impact, f.remediation, r.createdAt),
+        .bind(findingId(r.id, i), r.id, f.standardId, f.standardHash, f.classification, f.severity, f.source, f.file, f.lineStart, f.lineEnd, f.evidence, f.explanation, f.impact, f.remediation, r.createdAt),
     );
   }
   for (const e of r.events) {
+    // Events are only written if this call created the review, so a retry doesn't double them.
     stmts.push(
       db
-        .prepare("INSERT INTO review_events (review_id, step, outcome, duration_ms, detail, at) VALUES (?, ?, ?, ?, ?, ?)")
-        .bind(r.id, e.step, e.outcome, e.durationMs, e.detail ?? null, r.completedAt),
+        .prepare(
+          `INSERT INTO review_events (review_id, step, outcome, duration_ms, detail, at)
+           SELECT ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM review_events WHERE review_id = ? AND step = ?)`,
+        )
+        .bind(r.id, e.step, e.outcome, e.durationMs, e.detail ?? null, r.completedAt, r.id, e.step),
     );
   }
   await db.batch(stmts);
@@ -163,15 +195,22 @@ export async function getReview(db: D1Database, id: string): Promise<ReviewDetai
     }>();
   if (!r) return null;
 
+  // Only the versions this review ran against: the snapshot's (id, hash) pairs, passed as one JSON
+  // parameter (no per-standard placeholders, so no bound-parameter limit as standards grow).
   const [versions, current, findings, events] = await db.batch([
-    db.prepare("SELECT standard_id, content_hash, title, rule FROM standard_versions"),
-    db.prepare("SELECT id, content_hash, enabled FROM standards"),
+    db
+      .prepare(
+        `SELECT v.standard_id, v.content_hash, v.title, v.rule FROM standard_versions v
+         JOIN json_each(?) s ON v.standard_id = json_extract(s.value, '$.id') AND v.content_hash = json_extract(s.value, '$.contentHash')`,
+      )
+      .bind(r.standards_snapshot),
+    db.prepare("SELECT id, content_hash, enabled, retired_at FROM standards"),
     db.prepare("SELECT * FROM findings WHERE review_id = ? ORDER BY file, line_start, standard_id").bind(id),
     db.prepare("SELECT step, outcome, duration_ms, detail, at FROM review_events WHERE review_id = ? ORDER BY id").bind(id),
   ]);
 
   const versionOf = new Map((versions!.results as { standard_id: string; content_hash: string; title: string; rule: string }[]).map((v) => [`${v.standard_id}@${v.content_hash}`, v]));
-  const now = new Map((current!.results as { id: string; content_hash: string; enabled: number }[]).map((s) => [s.id, s]));
+  const now = new Map((current!.results as { id: string; content_hash: string; enabled: number; retired_at: string | null }[]).map((s) => [s.id, s]));
   const snapshot = JSON.parse(r.standards_snapshot) as StandardSnapshot[];
 
   return {
@@ -193,7 +232,10 @@ export async function getReview(db: D1Database, id: string): Promise<ReviewDetai
         ...s,
         title: v?.title ?? null,
         rule: v?.rule ?? null,
-        changedSince: { content: !!c && c.content_hash !== s.contentHash, enabled: !!c && (c.enabled === 1) !== s.enabled },
+        changedSince: {
+          content: !!c && c.content_hash !== s.contentHash,
+          enabled: !!c && (c.enabled === 1 && c.retired_at === null) !== s.enabled,
+        },
       };
     }),
     findings: (findings!.results as Record<string, unknown>[]).map((f) => ({

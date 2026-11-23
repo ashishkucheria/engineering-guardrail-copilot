@@ -8,6 +8,8 @@ import type { User } from "../core/types.ts";
 import * as db from "./db.ts";
 import { ApiError, errorResponse, json, readJson } from "./http.ts";
 
+const MAX_JSON_ESCAPE_FACTOR = 6;
+
 type Handler = (ctx: { req: Request; env: Env; params: Record<string, string>; url: URL }) => Promise<Response>;
 
 interface Route {
@@ -58,8 +60,10 @@ route("PATCH", "/api/standards/:id", async ({ req, env, params }) => {
   if (typeof body.enabled !== "boolean") throw new ApiError(400, "invalid_body", '"enabled" must be true or false.');
   const current = await db.getStandard(env.DB, params.id!);
   if (!current) throw new ApiError(404, "not_found", `No standard ${params.id}.`);
-  if (current.enabled !== body.enabled) {
-    await db.setStandardEnabled(env.DB, current.id, body.enabled, user.id, new Date().toISOString());
+  if (current.retiredAt) throw new ApiError(409, "retired", `${current.id} was retired (its YAML file was removed) and can't be toggled.`);
+  // Conditional update: if a concurrent request already made this change, nothing is written and
+  // no second audit row appears (see setStandardEnabled).
+  if (current.enabled !== body.enabled && (await db.setStandardEnabled(env.DB, current.id, body.enabled, user.id, new Date().toISOString()))) {
     console.log(JSON.stringify({ event: "standard_toggled", standard: current.id, enabled: body.enabled, by: user.id }));
   }
   return json(await db.getStandard(env.DB, current.id));
@@ -69,7 +73,9 @@ route("PATCH", "/api/standards/:id", async ({ req, env, params }) => {
 
 route("POST", "/api/reviews", async ({ req, env }) => {
   const user = await requireUser(req, env);
-  const body = await readJson(req, MAX_INPUT_BYTES + 1_000);
+  // The real limit is on the decoded input (below). The body cap only stops abuse: JSON escaping can
+  // grow text up to 6x (a \uXXXX escape per byte), so a valid 100 KB input always fits under it.
+  const body = await readJson(req, MAX_JSON_ESCAPE_FACTOR * MAX_INPUT_BYTES + 1_000);
   const input = body.input;
   if (typeof input !== "string" || input.trim() === "") throw new ApiError(400, "invalid_body", '"input" must be a non-empty string of code or a unified diff.');
   if (new TextEncoder().encode(input).byteLength > MAX_INPUT_BYTES) {
@@ -78,7 +84,7 @@ route("POST", "/api/reviews", async ({ req, env }) => {
 
   // Snapshot every standard (enabled or not) before reviewing, so this review keeps the versions
   // and statuses it ran against even if the standards change later.
-  const standards = await db.listStandards(env.DB);
+  const standards = (await db.listStandards(env.DB)).map(db.effective);
   const createdAt = new Date().toISOString();
   const t0 = Date.now();
   const result = await review(input, standards);
@@ -119,6 +125,14 @@ route("GET", "/api/reviews/:id", async ({ req, env, params }) => {
   return json(r);
 });
 
+function decodeParams(keys: string[], m: RegExpExecArray): Record<string, string> {
+  try {
+    return Object.fromEntries(keys.map((k, i) => [k, decodeURIComponent(m[i + 1]!)]));
+  } catch {
+    throw new ApiError(400, "invalid_path", "The URL contains a malformed percent-escape.");
+  }
+}
+
 // --------------------------------------------------------------------------------------------
 
 export default {
@@ -133,7 +147,7 @@ export default {
           methodMismatch = true;
           continue;
         }
-        const params = Object.fromEntries(r.keys.map((k, i) => [k, decodeURIComponent(m[i + 1]!)]));
+        const params = decodeParams(r.keys, m);
         return await r.handler({ req, env, params, url });
       }
       if (methodMismatch) throw new ApiError(405, "method_not_allowed", `${req.method} is not supported here.`);
