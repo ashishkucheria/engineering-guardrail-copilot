@@ -388,3 +388,48 @@ Start 3-B
 rate limits and the daily AI budget. It was tested with unit tests, a smoke test against a fake model, and one real
 eval run. The places where it differs from the design, including budget caps sized for the Workers AI free
 allocation, are listed in section 11 of the design doc. The PR waits for review.
+
+---
+
+## 8. Review of PR #3 (3-B)
+
+**Intent:** Leave the eval-budget question until there is usage data or errors, and fix the five findings of the
+3-B review.
+
+```text
+Dont spread it - we will look at it once we get some data from cloudflare or some error starts popping up. CHeck the review comments
+
+1. The AI budget isn't strict, and the design says it over-counts.
+   - A review reserves one call per chunk (review-workflow.ts:88). Each detect step then retries up to 3 more times (:26), and none of those retries are reserved. A failing chunk can therefore make 4 model calls against 1 reserved.
+   - The client uses temperature 0 with a fixed seed of 42 (ai.ts:35-36). A JSON-format failure or a truncated answer is likely to repeat identically, so those retries probably waste calls.
+   - /api/eval/detect has the same problem (attempts: 2).
+   - Fix: reserve 1 call at the start of each attempt, and raise NonRetryableError when the reservation is refused. That also removes the up-front budget step. Don't retry LlmFormatError unless the seed changes.
+   - Related: 20 app + 25 eval caps add up to 45 calls. By my arithmetic from the design's prices, a call costs about 300 neurons, so the 10,000-neuron free allocation covers about 33 calls. Treat the caps as a ceiling that exceeds the allowance, not a guarantee.
+2. Polling will trip the per-IP rate limit.
+   - useReview polls every 1.5 s, which is about 40 requests a minute per open review. RL_API allows 60 a minute per IP.
+   - Two tabs, or two people behind one office or demo NAT, will get 429s. The hook stops polling on the first error, so the page shows an error while the review finishes in the background.
+   - I read this from the code and didn't run it.
+   - Fix: exempt GET /api/reviews/:id from RL_API or give it a separate limiter. Also back off on 429 using Retry-After, and don't stop polling on a transient error.
+3. Anyone can use up another person's one challenge.
+   - POST /api/findings/:id/challenge has no ownership check, and a finding can only be challenged once.
+   - Any demo user, including a script (/api/users lists valid ids), can send a junk argument first. That locks the finding as upheld and burns a budget call, and the author can no longer challenge it.
+   - Restrict challenges to the review's author (and approvers), or allow the author to re-challenge.
+   - The disputed outcome also comes from a model reading the developer's own argument, so it's easy to steer. That matters once the dashboard counts "disputed" as a likely false positive.
+4. Prompt injection can still break out of the code block.
+   - The code sits between fixed BEGIN CODE and END CODE markers (prompts.ts:72-74), and the challenge argument uses the same pattern. Code containing END CODE followed by new instructions can end the block early.
+   - Findings the model omits are invisible to the verdict, so injection is the main residual risk to the product's claim.
+   - Use a random per-request delimiter, and add an eval case that tries the break-out. The current hard gate only tests a plain comment.
+5. Rule findings are uncapped before the Workflow step boundary.
+   - The rules step returns every finding, and the 200-finding cap only applies later in finalize. A 99 KB input of TODO lines gave 4,000 findings and a 1.9 MB step output. A secret-heavy input gave 1.4 MB.
+   - Locally it worked and capped at 200, so the local runtime doesn't enforce the limit. The design cites a 1 MiB step-output limit on deployed Workflows, where this probably fails the review.
+   - Fix: apply the cap inside the step, and test it on the first deploy.
+```
+
+**Outcome:** All five were fixed on the 3-B branch (design doc §11, items 2, 7, 10, 11 and 12):
+- Every model call, retries included, reserves one budget call, and each retry uses a new seed.
+- Polling a review has its own rate limit, and the UI backs off instead of stopping.
+- Only the author or an approver can challenge.
+- Prompts use a random delimiter per request (prompt v3), with a new break-out eval case as a hard gate.
+- Rule findings are capped inside the Workflow step.
+
+The eval-budget question stays open until there is usage data.

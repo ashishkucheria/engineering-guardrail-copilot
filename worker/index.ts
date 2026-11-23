@@ -1,10 +1,10 @@
 // API Worker. Static assets (the React app) are served by the assets binding; only /api/* reaches
 // this code (see run_worker_first in wrangler.jsonc). Reviews run in the ReviewWorkflow.
 import type { ChallengeResult, MetaView } from "../core/api-types.ts";
-import { planChunks, renderLine } from "../core/chunk.ts";
+import { renderLine } from "../core/chunk.ts";
 import { MAX_INPUT_BYTES, parseInput } from "../core/diff.ts";
-import { llmDetector, llmStandards, parseJsonResponse } from "../core/llm.ts";
-import { canToggleStandard } from "../core/policy.ts";
+import { llmDetector, parseJsonResponse } from "../core/llm.ts";
+import { canChallenge, canToggleStandard } from "../core/policy.ts";
 import { buildChallengeMessages, CHALLENGE_SCHEMA, PROMPT_VERSION } from "../core/prompts.ts";
 import { redactSecrets } from "../core/rules.ts";
 import { snapshotOf } from "../core/standards.ts";
@@ -135,7 +135,7 @@ route("GET", "/api/reviews", async ({ req, env, url }) => {
 });
 
 route("GET", "/api/reviews/:id", async ({ req, env, params }) => {
-  await requireUser(req, env);
+  const user = await requireUser(req, env);
   const id = params.id!;
   // Backstop: a review stuck in queued/running for 15 minutes is checked against its Workflow
   // instance, and recorded as failed if the instance errored, was terminated or doesn't exist.
@@ -152,7 +152,7 @@ route("GET", "/api/reviews/:id", async ({ req, env, params }) => {
   }
   const r = await db.getReview(env.DB, id);
   if (!r) throw new ApiError(404, "not_found", "No such review.");
-  return json(r);
+  return json({ ...r, viewerCanChallenge: canChallenge(user, r.author.id).ok });
 });
 
 // --- Challenges -----------------------------------------------------------------------------
@@ -166,6 +166,8 @@ route("POST", "/api/findings/:id/challenge", async ({ req, env, params }) => {
   }
   const f = await db.getFindingForChallenge(env.DB, params.id!);
   if (!f) throw new ApiError(404, "not_found", "No such finding.");
+  const allowed = canChallenge(user, f.reviewAuthorId);
+  if (!allowed.ok) throw new ApiError(403, allowed.code, allowed.message);
   if (f.challengeOutcome) throw new ApiError(409, "already_challenged", "This finding has already been challenged.");
   const client = llmClient(env);
   if (!client) throw new ApiError(503, "ai_off", "AI is turned off, so challenges can't be assessed.");
@@ -236,10 +238,20 @@ route("POST", "/api/eval/detect", async ({ req, env }) => {
   if (!client) throw new ApiError(503, "ai_off", "AI is turned off (LLM_MODE=off).");
   const standards = (await db.listStandards(env.DB)).filter((s) => !s.retiredAt).map((s) => ({ ...s, enabled: true }));
   const parsed = parseInput(input);
-  await reserveOr429(env, "eval", llmStandards(standards).length ? planChunks(parsed).chunks.length : 0);
   const t0 = Date.now();
   const chunks: { chunk: string; outcome: string; detail: string }[] = [];
-  const r = await llmDetector(client, { attempts: 2, onChunk: (chunk, outcome, detail) => chunks.push({ chunk, outcome, detail }) }).detect(parsed, standards, input);
+  const now = new Date();
+  // One reservation per model call, retries included (review of PR #3, item 1).
+  const r = await llmDetector(client, {
+    attempts: 2,
+    reserve: () => reserve(env.DB, "eval", 1, budgetLimit(env, "eval"), new Date()),
+    onChunk: (chunk, outcome, detail) => chunks.push({ chunk, outcome, detail }),
+  }).detect(parsed, standards, input);
+  if (chunks.some((c) => c.outcome === "skipped")) {
+    // A partly reviewed case would be scored as missed findings; stop the run instead.
+    console.log(JSON.stringify({ event: "budget_exhausted", bucket: "eval" }));
+    throw new ApiError(429, "budget_exhausted", "Today's eval AI budget is used up. It resets at midnight UTC.", { "retry-after": String(secondsUntilReset(now)) });
+  }
   return json({ ...r, chunks, model: client.model, promptVersion: PROMPT_VERSION, ms: Date.now() - t0 });
 });
 
@@ -262,10 +274,20 @@ async function sameSecret(a: string, b: string): Promise<boolean> {
 // --- Rate limits (design §10) ---------------------------------------------------------------
 
 const CHALLENGE_OR_CHAT = /^\/api\/(findings\/[^/]+\/challenge|reviews\/[^/]+\/chat)$/;
+const ONE_REVIEW = /^\/api\/reviews\/[^/]+$/;
+
+function limiterFor(req: Request, env: Env, path: string): RateLimit {
+  if (req.method === "POST" && path === "/api/reviews") return env.RL_REVIEW;
+  if (req.method === "POST" && CHALLENGE_OR_CHAT.test(path)) return env.RL_LLM;
+  // The UI polls a running review; that has its own limit so polling can't lock out the rest of
+  // the API, or be locked out by it (review of PR #3, item 2).
+  if (req.method === "GET" && ONE_REVIEW.test(path)) return env.RL_POLL;
+  return env.RL_API;
+}
 
 /** Per-IP burst limits, keyed by CF-Connecting-IP (set by Cloudflare), never by X-Demo-User. */
 async function checkRateLimit(req: Request, env: Env, path: string): Promise<void> {
-  const limiter = req.method === "POST" && path === "/api/reviews" ? env.RL_REVIEW : req.method === "POST" && CHALLENGE_OR_CHAT.test(path) ? env.RL_LLM : env.RL_API;
+  const limiter = limiterFor(req, env, path);
   const { success } = await limiter.limit({ key: req.headers.get("cf-connecting-ip") ?? "unknown" });
   if (!success) {
     console.log(JSON.stringify({ event: "rate_limited", method: req.method, path }));

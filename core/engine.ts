@@ -64,18 +64,31 @@ export function finalize(input: ParsedInput, all: Finding[], extraSkipped: Cover
       a.source.localeCompare(b.source) ||
       a.evidence.localeCompare(b.evidence),
   );
-  if (findings.length > MAX_FINDINGS) {
-    // Keep the most important ones: violations before suggestions, then by severity.
-    const sev = { blocker: 0, major: 1, minor: 2 } as const;
-    const kept = new Set(
-      [...findings]
-        .sort((a, b) => (a.classification === b.classification ? 0 : a.classification === "violation" ? -1 : 1) || sev[a.severity] - sev[b.severity])
-        .slice(0, MAX_FINDINGS),
-    );
-    coverage.skipped.push({ file: "(whole review)", reason: `${findings.length - MAX_FINDINGS} finding(s) over the ${MAX_FINDINGS}-finding cap were dropped` });
-    findings = findings.filter((f) => kept.has(f));
-  }
+  const capped = capFindings(findings);
+  if (capped.dropped > 0) coverage.skipped.push(capGap(capped.dropped));
+  findings = capped.findings;
   return { findings, coverage, verdict: computeVerdict(findings, coverage) };
+}
+
+/** The coverage gap recorded when findings are dropped over the cap. */
+export function capGap(dropped: number): Coverage["skipped"][number] {
+  return { file: "(whole review)", reason: `${dropped} finding(s) over the ${MAX_FINDINGS}-finding cap were dropped` };
+}
+
+/**
+ * Keep at most `max` findings, the most important first (violations before suggestions, then by
+ * severity), in their original order. Also used inside the Workflow's rules step, so a step never
+ * returns more than the cap (review of PR #3, item 5: step output is limited to 1 MiB).
+ */
+export function capFindings(findings: Finding[], max = MAX_FINDINGS): { findings: Finding[]; dropped: number } {
+  if (findings.length <= max) return { findings, dropped: 0 };
+  const sev = { blocker: 0, major: 1, minor: 2 } as const;
+  const kept = new Set(
+    [...findings]
+      .sort((a, b) => (a.classification === b.classification ? 0 : a.classification === "violation" ? -1 : 1) || sev[a.severity] - sev[b.severity])
+      .slice(0, max),
+  );
+  return { findings: findings.filter((f) => kept.has(f)), dropped: findings.length - max };
 }
 
 /**

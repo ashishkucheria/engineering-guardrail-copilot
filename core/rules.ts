@@ -6,6 +6,14 @@ import type { FileChunk, Finding, ParsedInput, SourceLine, Standard } from "./ty
 
 type RuleFn = (input: ParsedInput, s: Standard) => Finding[];
 
+/**
+ * Evidence is the (redacted) line. A minified file can be one 100 KB line, and every secret on it
+ * is its own finding, so the evidence is clipped to keep findings, and the Workflow step that
+ * returns them, small.
+ */
+export const MAX_EVIDENCE_CHARS = 500;
+const clip = (text: string) => (text.length > MAX_EVIDENCE_CHARS ? `${text.slice(0, MAX_EVIDENCE_CHARS)}… (line clipped)` : text);
+
 function finding(s: Standard, file: string, line: SourceLine, evidence: string, text: { explanation: string; impact: string; remediation: string }): Finding {
   return {
     standardId: s.id,
@@ -16,7 +24,7 @@ function finding(s: Standard, file: string, line: SourceLine, evidence: string, 
     file,
     lineStart: line.n,
     lineEnd: line.n,
-    evidence,
+    evidence: clip(evidence),
     ...text,
   };
 }

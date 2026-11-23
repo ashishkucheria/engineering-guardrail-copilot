@@ -115,16 +115,20 @@ await check("an AI review runs through the Workflow: verified findings, a halluc
   ].join("\n");
   aiReview = await reviewOf(input);
   assert(aiReview.status === "complete" && aiReview.verdict === "warn", `status ${aiReview.status}, verdict ${aiReview.verdict}`);
-  assert(aiReview.engine === "rules+llm(v2)" && aiReview.promptVersion === "v2" && aiReview.model === "fake", `engine ${aiReview.engine} ${aiReview.model}`);
+  assert(aiReview.engine === "rules+llm(v3)" && aiReview.promptVersion === "v3" && aiReview.model === "fake", `engine ${aiReview.engine} ${aiReview.model}`);
   const got = aiReview.findings.map((f) => `${f.standardId}:${f.source}:${f.classification}:${f.lineStart}`).sort();
   assert(JSON.stringify(got) === JSON.stringify(["REL-001:llm:violation:3", "REL-002:llm:violation:2"]), `findings ${got}`);
   const detect = aiReview.events.find((e) => e.step.startsWith("detect:"));
   assert(detect?.outcome === "ok" && /dropped 1: evidence not found/.test(detect.detail), `detect event ${JSON.stringify(detect)}`);
-  for (const step of ["load-context", "validate", "rules", "budget", "persist"]) assert(aiReview.events.some((e) => e.step === step && e.outcome === "ok"), `missing ${step} event`);
+  for (const step of ["load-context", "validate", "rules", "persist"]) assert(aiReview.events.some((e) => e.step === step && e.outcome === "ok"), `missing ${step} event`);
 });
 
-await check("an AI failure after retries is a coverage gap: verdict incomplete, never pass (takes ~40 s)", async () => {
+await check("an AI failure after retries is a coverage gap, and every attempt is paid for (takes ~40 s)", async () => {
+  const before = (await api("GET", "/api/meta")).data.budget.app.used;
   const r = await reviewOf('// FAKE_LLM_FAIL\nexport const x = 1;\n');
+  const used = (await api("GET", "/api/meta")).data.budget.app.used - before;
+  const attempts = r.events.filter((e) => e.outcome === "retry").length;
+  assert(used === attempts, `${attempts} model attempts but ${used} budget call(s) reserved; every attempt must reserve one`);
   assert(r.status === "complete" && r.verdict === "incomplete", `status ${r.status}, verdict ${r.verdict}`);
   assert(r.coverage.skipped.some((s) => /AI review failed/.test(s.reason)), `coverage ${JSON.stringify(r.coverage)}`);
   assert(r.events.filter((e) => e.outcome === "retry").length >= 2, "the detect step should have been retried");
@@ -146,12 +150,21 @@ await check("an AI finding on an unchanged line of a diff is a pre-existing sugg
 
 // --- Challenges (3-B) ------------------------------------------------------------------------
 
+await check("only the author or an approver can challenge: another developer gets 403 and uses nothing up", async () => {
+  const f = aiReview.findings.find((x) => x.standardId === "REL-002");
+  const r = await api("POST", `/api/findings/${encodeURIComponent(f.id)}/challenge`, { user: DEV2, body: { argument: "junk" } });
+  assert(r.status === 403 && r.data.error.code === "forbidden", `got ${r.status} ${JSON.stringify(r.data)}`);
+  assert((await api("GET", `/api/reviews/${aiReview.id}`, { user: DEV2 })).data.viewerCanChallenge === false, "the UI flag should be false for another developer");
+  const mine = (await api("GET", `/api/reviews/${aiReview.id}`, { user: DEV })).data;
+  assert(mine.viewerCanChallenge === true && !mine.findings.find((x) => x.id === f.id).challenge, "the author can still challenge");
+});
+
 await check("a successful challenge marks an AI finding disputed and leaves the verdict alone", async () => {
   const f = aiReview.findings.find((x) => x.standardId === "REL-002");
-  const r = await api("POST", `/api/findings/${encodeURIComponent(f.id)}/challenge`, { user: DEV2, body: { argument: "not_supported: the caller wraps this in a timeout." } });
+  const r = await api("POST", `/api/findings/${encodeURIComponent(f.id)}/challenge`, { user: DEV, body: { argument: "not_supported: the caller wraps this in a timeout." } });
   assert(r.status === 200 && r.data.assessment === "not_supported", `got ${r.status} ${JSON.stringify(r.data)}`);
   assert(r.data.finding.challengeOutcome === "disputed" && r.data.finding.classification === "violation" && r.data.finding.severity === f.severity, `finding ${JSON.stringify(r.data.finding)}`);
-  assert(r.data.finding.challenge.by.id === DEV2 && r.data.finding.challenge.argument.startsWith("not_supported"), "challenge not recorded with who and why");
+  assert(r.data.finding.challenge.by.id === DEV && r.data.finding.challenge.argument.startsWith("not_supported"), "challenge not recorded with who and why");
   const after = (await api("GET", `/api/reviews/${aiReview.id}`, { user: DEV })).data;
   assert(after.verdict === aiReview.verdict, `verdict changed from ${aiReview.verdict} to ${after.verdict}`);
 });
@@ -165,10 +178,10 @@ await check("a finding can be challenged once (409), and a challenge needs an ar
   assert((await api("POST", "/api/findings/nope/challenge", { user: DEV, body: { argument: "x" } })).status === 404, "unknown finding should be 404");
 });
 
-await check("a challenge to a rule finding is always upheld", async () => {
+await check("an approver can challenge someone else's finding; a rule finding is always upheld", async () => {
   const r = await reviewOf('const apiKey = "abcd1234abcd1234";\n');
   const f = r.findings.find((x) => x.source === "rule");
-  const c = await api("POST", `/api/findings/${encodeURIComponent(f.id)}/challenge`, { user: DEV, body: { argument: "not_supported: it's a test key." } });
+  const c = await api("POST", `/api/findings/${encodeURIComponent(f.id)}/challenge`, { user: APPROVER, body: { argument: "not_supported: it's a test key." } });
   assert(c.status === 200 && c.data.assessment === "not_supported" && c.data.finding.challengeOutcome === "upheld", `got ${c.status} ${JSON.stringify(c.data)}`);
 });
 
@@ -285,6 +298,20 @@ await check("per-IP rate limit: the 6th review request in a minute from one IP g
   const last = await api("POST", "/api/reviews", { user: DEV, body: { input: "" }, ip });
   assert(last.status === 429 && last.data.error.code === "rate_limited" && last.headers.get("retry-after"), `got ${last.status} after ${statuses}`);
   assert((await api("POST", "/api/reviews", { user: DEV, body: { input: "" } })).status === 400, "another IP is not limited");
+});
+
+await check("polling one review has its own limit: 70 reads a minute from one IP all succeed", async () => {
+  const ip = randomIp();
+  const statuses = new Set();
+  for (let i = 0; i < 70; i++) statuses.add((await api("GET", `/api/reviews/${aiReview.id}`, { user: DEV, ip })).status);
+  assert(statuses.size === 1 && statuses.has(200), `statuses ${[...statuses]}`);
+});
+
+await check("rule findings are capped inside the Workflow step: 4,000 TODOs give 200 findings and a recorded gap", async () => {
+  const r = await reviewOf(Array.from({ length: 4_000 }, (_, i) => `// TODO fix ${i}`).join("\n") + "\n");
+  assert(r.status === "complete" && r.findings.length === 200, `status ${r.status}, ${r.findings.length} findings`);
+  assert(r.coverage.skipped.some((s) => /over the 200-finding cap/.test(s.reason)) && r.verdict === "incomplete", `coverage ${JSON.stringify(r.coverage.skipped)}`);
+  assert(r.events.some((e) => e.step === "rules" && /3800 over the cap dropped/.test(e.detail)), "the rules step should report the drop");
 });
 
 await check("daily AI budget: once used up, reviews run rules only (incomplete) and challenges get 429", async () => {

@@ -227,6 +227,7 @@ export async function isStale(db: D1Database, id: string, before: string): Promi
 export interface FindingForChallenge {
   id: string;
   reviewId: string;
+  reviewAuthorId: string;
   standardId: string;
   standardTitle: string;
   standardRule: string;
@@ -244,7 +245,7 @@ export async function getFindingForChallenge(db: D1Database, id: string): Promis
   const r = await db
     .prepare(
       `SELECT f.id, f.review_id, f.standard_id, v.title, v.rule, f.source, f.file, f.line_start, f.line_end, f.evidence, f.explanation,
-              f.challenge_outcome, r.input_text
+              f.challenge_outcome, r.input_text, r.author_id
        FROM findings f
        JOIN reviews r ON r.id = f.review_id
        JOIN standard_versions v ON v.standard_id = f.standard_id AND v.content_hash = f.standard_hash
@@ -256,6 +257,7 @@ export async function getFindingForChallenge(db: D1Database, id: string): Promis
   return {
     id: r.id as string,
     reviewId: r.review_id as string,
+    reviewAuthorId: r.author_id as string,
     standardId: r.standard_id as string,
     standardTitle: r.title as string,
     standardRule: r.rule as string,
@@ -313,7 +315,7 @@ export async function listReviews(db: D1Database, limit: number): Promise<Review
 
 
 
-export async function getReview(db: D1Database, id: string): Promise<ReviewDetail | null> {
+export async function getReview(db: D1Database, id: string): Promise<Omit<ReviewDetail, "viewerCanChallenge"> | null> {
   const r = await db
     .prepare(`SELECT r.*, u.name AS author_name FROM reviews r JOIN users u ON u.id = r.author_id WHERE r.id = ?`)
     .bind(id)

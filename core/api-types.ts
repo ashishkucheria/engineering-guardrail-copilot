@@ -97,6 +97,8 @@ export interface ReviewDetail {
   standards: SnapshotEntry[];
   findings: FindingView[];
   events: ReviewEvent[];
+  /** Whether the requesting user may challenge this review's findings (see canChallenge). */
+  viewerCanChallenge: boolean;
 }
 
 export interface ApiErrorBody {

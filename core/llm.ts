@@ -15,8 +15,19 @@ export interface LlmClient {
   /** Model id, recorded on every review. */
   model: string;
   /** One JSON-mode call. Resolves to the parsed object (or its JSON text); rejects on any failure. */
-  json(messages: ChatMessage[], schema: JsonSchema, opts?: { maxTokens?: number }): Promise<unknown>;
+  json(messages: ChatMessage[], schema: JsonSchema, opts?: { maxTokens?: number; seed?: number }): Promise<unknown>;
 }
+
+/**
+ * Calls run at temperature 0, so the same prompt and seed tend to give the same answer. A retry
+ * with the same seed would most likely repeat a malformed or truncated answer and waste a call, so
+ * every retry uses the next seed (review of PR #3, item 1).
+ */
+export const BASE_SEED = 42;
+export const seedFor = (attempt: number) => BASE_SEED + Math.max(0, attempt - 1);
+
+/** Coverage reason when a chunk is skipped because the day's AI budget is used up. */
+export const BUDGET_REASON = "daily AI budget reached";
 
 /** A response that doesn't fit the schema. Thrown so the caller retries it like any other failure. */
 export class LlmFormatError extends Error {
@@ -121,6 +132,8 @@ export interface ChunkResult {
 export interface DetectOptions {
   /** Off only for the eval config that measures what verification is worth. */
   verify?: boolean;
+  /** Seed for this call; see seedFor. */
+  seed?: number;
 }
 
 /** String literals quoted in SEC-001 evidence; they are redacted wherever the model repeats them. */
@@ -188,7 +201,7 @@ export function llmStandards(enabled: Standard[]): Standard[] {
 
 export async function detectChunk(client: LlmClient, chunk: CodeChunk, standards: Standard[], opts: DetectOptions = {}): Promise<ChunkResult> {
   const messages = buildDetectionMessages(chunk, standards);
-  const raw = await client.json(messages, detectionSchema(standards.map((s) => s.id)), { maxTokens: 2048 });
+  const raw = await client.json(messages, detectionSchema(standards.map((s) => s.id)), { maxTokens: 2048, seed: opts.seed ?? BASE_SEED });
   const { items, malformed } = parseDetection(raw);
   const r = toFindings(items, chunk, standards, opts);
   r.dropped.malformed += malformed;
@@ -201,7 +214,12 @@ export async function detectChunk(client: LlmClient, chunk: CodeChunk, standards
 export interface LlmDetectorOptions extends DetectOptions {
   /** Attempts per chunk (the Workflow has its own retries; this is for synchronous use). */
   attempts?: number;
-  onChunk?: (label: string, outcome: "ok" | "failed", detail: string) => void;
+  /**
+   * Called before every model call, retries included. Returning false means the budget is used up:
+   * no call is made, and this chunk and every later one become coverage gaps.
+   */
+  reserve?: () => Promise<boolean>;
+  onChunk?: (label: string, outcome: "ok" | "failed" | "skipped", detail: string) => void;
 }
 
 export function llmDetector(client: LlmClient, opts: LlmDetectorOptions = {}): Detector {
@@ -213,13 +231,18 @@ export function llmDetector(client: LlmClient, opts: LlmDetectorOptions = {}): D
       const plan = planChunks(input);
       const findings: Finding[] = [];
       const skipped = [...plan.skipped];
+      let budgetOut = false;
       for (const chunk of plan.chunks) {
         const label = chunkLabel(chunk);
         let lastError = "";
         let done = false;
-        for (let attempt = 1; attempt <= (opts.attempts ?? 2) && !done; attempt++) {
+        for (let attempt = 1; attempt <= (opts.attempts ?? 2) && !done && !budgetOut; attempt++) {
+          if (opts.reserve && !(await opts.reserve())) {
+            budgetOut = true;
+            break;
+          }
           try {
-            const r = await detectChunk(client, chunk, standards, opts);
+            const r = await detectChunk(client, chunk, standards, { ...opts, seed: seedFor(attempt) });
             findings.push(...r.findings);
             opts.onChunk?.(label, "ok", describeDrops(r));
             done = true;
@@ -227,7 +250,11 @@ export function llmDetector(client: LlmClient, opts: LlmDetectorOptions = {}): D
             lastError = e instanceof Error ? e.message : String(e);
           }
         }
-        if (!done) {
+        if (done) continue;
+        if (budgetOut) {
+          skipped.push({ file: label, reason: BUDGET_REASON });
+          opts.onChunk?.(label, "skipped", BUDGET_REASON);
+        } else {
           skipped.push({ file: label, reason: `AI review failed: ${lastError}` });
           opts.onChunk?.(label, "failed", lastError);
         }

@@ -1,11 +1,10 @@
 // LLM clients. `workers-ai` calls Llama 3.3 in JSON mode. `fake` is a deterministic stand-in for
 // the smoke test and CI: it makes no network call and costs nothing, so the whole pipeline
 // (Workflow, verification, persistence, challenge) can be tested without the model.
-import type { LlmClient } from "../core/llm.ts";
+import { BASE_SEED, type LlmClient } from "../core/llm.ts";
 import type { ChatMessage, JsonSchema } from "../core/prompts.ts";
 
 export const MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
-const SEED = 42;
 
 export type LlmMode = "workers-ai" | "fake" | "off";
 
@@ -28,12 +27,12 @@ export function workersAiClient(ai: Ai): LlmClient {
   const run = (ai.run as unknown as AiRun).bind(ai);
   return {
     model: MODEL,
-    async json(messages: ChatMessage[], schema: JsonSchema, opts?: { maxTokens?: number }) {
+    async json(messages: ChatMessage[], schema: JsonSchema, opts?: { maxTokens?: number; seed?: number }) {
       const res = await run(MODEL, {
         messages,
         response_format: { type: "json_schema", json_schema: schema },
         temperature: 0,
-        seed: SEED,
+        seed: opts?.seed ?? BASE_SEED,
         max_tokens: opts?.maxTokens ?? 1024,
       });
       if (res?.response === undefined || res.response === null) throw new Error("Workers AI returned no response.");
@@ -56,12 +55,12 @@ export const fakeClient: LlmClient = {
     const user = messages.find((m) => m.role === "user")?.content ?? "";
     const props = (schema as { properties?: Record<string, unknown> }).properties ?? {};
     if ("assessment" in props) {
-      const arg = /BEGIN ARGUMENT\n([\s\S]*)\nEND ARGUMENT/.exec(user)?.[1] ?? "";
+      const arg = /BEGIN ARGUMENT ([0-9a-f]+)\n([\s\S]*)\nEND ARGUMENT \1/.exec(user)?.[2] ?? "";
       return arg.includes("not_supported")
         ? { assessment: "not_supported", reasoning: "Fake model: the argument was accepted." }
         : { assessment: "upheld", reasoning: "Fake model: the finding stands." };
     }
-    const code = /BEGIN CODE\n([\s\S]*)\nEND CODE/.exec(user)?.[1] ?? "";
+    const code = /BEGIN CODE ([0-9a-f]+)\n([\s\S]*)\nEND CODE \1/.exec(user)?.[2] ?? "";
     if (code.includes("FAKE_LLM_FAIL")) throw new Error("Fake model failure (FAKE_LLM_FAIL in the code).");
     const allowed = new Set(((props.findings as { items: { properties: { standard_id: { enum: string[] } } } }).items.properties.standard_id.enum) ?? []);
     const findings: Record<string, string>[] = [];

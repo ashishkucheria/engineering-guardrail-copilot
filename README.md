@@ -37,17 +37,21 @@ What works (tested; see below):
     the change.
   - Secrets the model quotes are redacted, and an AI "secret" whose value is a placeholder (`<your-key>`, `****`)
     is dropped, by the same definition the rule uses.
-  - Detection never sees feedback history, and the prompt treats code as data (prompt-injection case in the eval).
-- **Failure is visible, never a silent pass.** A chunk the model can't answer after 3 retries becomes a coverage
+  - Detection never sees feedback history, and the prompt treats code as data. The code sits between markers
+    with a random tag per request, so code containing its own "END CODE" line can't close the block early (two
+    prompt-injection hard gates in the eval).
+- **Failure is visible, never a silent pass.** A chunk the model can't answer after 3 retries (each with a new seed) becomes a coverage
   gap and the verdict is `incomplete` (still `fail` if a rule found a blocker). Large files are chunked (8,000
   characters, 15 lines of overlap, at most 40 chunks), never truncated. At most 200 findings are kept per review;
   the rest are recorded as a gap.
 - **Challenges:** "Challenge this finding" sends your argument, the standard and the surrounding code to the model.
   An AI finding it agrees is wrong is marked **Disputed**, but its classification, severity and the verdict never
   change (only an approved exception will waive a violation, in 3-C). A rule finding is always upheld. One
-  challenge per finding, recorded with who, why and the model's reasoning.
-- **Cost protection** (design §10): per-IP rate limits (5 reviews and 10 challenges a minute) and a strict daily cap
-  on AI calls in D1. Once the cap is reached, reviews still run the deterministic checks and are marked
+  challenge per finding, only by the review's author or an approver, recorded with who, why and the model's
+  reasoning.
+- **Cost protection** (design §10): per-IP rate limits (5 reviews and 10 challenges a minute; polling a running
+  review has its own, looser limit) and a strict daily cap on AI calls in D1. Every model call, retries included,
+  reserves one call first. Once the cap is reached, reviews still run the deterministic checks and are marked
   `incomplete`, and challenges get `429` with `Retry-After`.
 - Standards live in `standards/*.yaml`. Approvers can enable or disable them, every change is audited, and every
   review keeps a snapshot of the version and status of every standard it ran with.
@@ -87,11 +91,13 @@ The fake model (`worker/ai.ts`) recognises a few patterns, invents one quote tha
 told to fail. The smoke test uses it to check the whole pipeline without AI calls:
 
 - An AI review through the Workflow: verified findings with lines, a hallucinated quote dropped, every step logged.
-- An AI failure after retries is `incomplete`, and a rule blocker still fails.
+- An AI failure after retries is `incomplete`, a rule blocker still fails, and every attempt used one budget call.
 - An AI finding on an unchanged diff line is a pre-existing suggestion.
-- Challenges: disputed without changing the verdict, once per finding, rule findings always upheld.
-- The 6th review request in a minute from one IP gets `429`. Once the daily budget is used up, reviews run rules
-  only and challenges get `429` with `Retry-After`.
+- Challenges: disputed without changing the verdict, once per finding, only by the author or an approver, rule
+  findings always upheld.
+- The 6th review request in a minute from one IP gets `429`, while 70 polls of one review a minute don't. 4,000
+  TODOs give 200 findings and a recorded gap. Once the daily budget is used up, reviews run rules only and
+  challenges get `429` with `Retry-After`.
 - Everything from 3-A: 401/403/404/405/413, audited toggles, snapshots, redaction regressions.
 
 ## Eval harness
@@ -105,13 +111,14 @@ detectors as the app and reports precision, recall and F1 per standard, false po
 - `rules`: deterministic checks only, no network. CI runs it in `--strict` mode.
 - `llm`: rules plus the real model, through `POST /api/eval/detect` on a running app (`--target`, default
   `http://localhost:5173`). The endpoint needs the `EVAL_TOKEN` secret (from `.dev.vars` locally) and spends the
-  separate eval budget, one call per case.
+  separate eval budget, one call per model call (usually one per case).
 
-First real run (22 cases, Llama 3.3 70B, prompt v2, [`eval/results/2026-11-23-llm-run1.json`](eval/results/2026-11-23-llm-run1.json)):
+First real run (22 cases, Llama 3.3 70B, prompt v2, before the review fixes, [`eval/results/2026-11-23-llm-run1.json`](eval/results/2026-11-23-llm-run1.json)):
 recall 100% (17/17), precision 85%, both hard gates passed, **blocker precision 80%**. The two false blockers were
 AI "secrets" that were placeholders. The placeholder guard above fixed that case in a single re-run, but the full
 suite hasn't been re-run since. One OBS-001 false positive (a password literal flagged as "logging a secret")
-remains. A single run at temperature 0 says nothing about run-to-run variance; that's part of 3-C.
+remains. A single run at temperature 0 says nothing about run-to-run variance; that's part of 3-C. Prompt v3 (random
+delimiters) has only been run on the two prompt-injection cases so far: both passed.
 
 ## Layout
 
@@ -135,8 +142,14 @@ docs/        design
 - Any demo user can read any review. With stored inputs, the demo must not be used with real secrets.
 - One abuser can use up the day's AI budget for everyone. The demo then runs deterministic checks only; it never
   becomes an unbounded bill. Per-IP limits can be dodged with many IPs; the global budget still holds.
-- The free Workers AI allocation (about 40 calls a day) is shared by the app, local development and the eval. The
-  budgets (`DAILY_LLM_CALLS_APP=20`, `DAILY_LLM_CALLS_EVAL=25` in `wrangler.jsonc`) are sized for it.
+- The free Workers AI allocation (10,000 neurons, about 33 calls a day at roughly 300 neurons a call) is shared by
+  the app, local development and the eval. The caps (`DAILY_LLM_CALLS_APP=20`, `DAILY_LLM_CALLS_EVAL=25` in
+  `wrangler.jsonc`) add up to 45: a ceiling on what the app tries, not a guarantee. A call past the free allocation
+  fails (no charge) and shows as a coverage gap.
+- A "disputed" challenge comes from a model reading the developer's own argument, so it can be steered. It never
+  changes the verdict, and it shouldn't be read as a confirmed false positive.
+- The 1 MiB limit on Workflow step output isn't enforced in local dev. Findings are capped inside the steps, but
+  the limit is only really tested on the first deploy.
 - AI verification checks that the quote exists, not that the model's reasoning is right. A real line can still be
   wrongly flagged; that's what challenges and the eval's blocker precision are for.
 - TST-001 is satisfied by *any* test file in the diff. Secret detection uses patterns, not every format. The

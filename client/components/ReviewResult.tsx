@@ -48,8 +48,11 @@ export function ReviewResult({ review, showSnapshot = false, onChanged }: { revi
 
       {!inProgress && review.status !== "failed" && (
         <>
-          <FindingGroup title="Violations" empty="No violations." findings={violations} onChanged={onChanged} />
-          {suggestions.length > 0 && <FindingGroup title="Suggestions" empty="" findings={suggestions} onChanged={onChanged} />}
+          <FindingGroup title="Violations" empty="No violations." findings={violations} canChallenge={review.viewerCanChallenge} onChanged={onChanged} />
+          {suggestions.length > 0 && <FindingGroup title="Suggestions" empty="" findings={suggestions} canChallenge={review.viewerCanChallenge} onChanged={onChanged} />}
+          {!review.viewerCanChallenge && review.findings.length > 0 && (
+            <p className="muted small">Only {review.author.name} (the author) or an approver can challenge these findings.</p>
+          )}
           {review.findings.some((f) => f.challengeOutcome === "disputed") && (
             <p className="muted small">
               A disputed finding is a likely false positive. It still counts toward the verdict: only an approved exception
@@ -107,7 +110,7 @@ export function ReviewResult({ review, showSnapshot = false, onChanged }: { revi
   );
 }
 
-function FindingGroup({ title, empty, findings, onChanged }: { title: string; empty: string; findings: FindingView[]; onChanged?: () => void }) {
+function FindingGroup({ title, empty, findings, canChallenge, onChanged }: { title: string; empty: string; findings: FindingView[]; canChallenge: boolean; onChanged?: () => void }) {
   return (
     <section className="card">
       <h3>
@@ -116,14 +119,14 @@ function FindingGroup({ title, empty, findings, onChanged }: { title: string; em
       {findings.length === 0 && <p className="muted">{empty}</p>}
       <div className="stack">
         {findings.map((f) => (
-          <FindingCard key={f.id} f={f} onChanged={onChanged} />
+          <FindingCard key={f.id} f={f} canChallenge={canChallenge} onChanged={onChanged} />
         ))}
       </div>
     </section>
   );
 }
 
-function FindingCard({ f, onChanged }: { f: FindingView; onChanged?: () => void }) {
+function FindingCard({ f, canChallenge, onChanged }: { f: FindingView; canChallenge: boolean; onChanged?: () => void }) {
   return (
     <article className={`finding sev-border-${f.severity}`}>
       <header className="row spread">
@@ -156,7 +159,7 @@ function FindingCard({ f, onChanged }: { f: FindingView; onChanged?: () => void 
         <dt>Fix</dt>
         <dd>{f.remediation}</dd>
       </dl>
-      {f.challenge ? <ChallengeRecord f={f} /> : <ChallengeForm f={f} onChanged={onChanged} />}
+      {f.challenge ? <ChallengeRecord f={f} /> : canChallenge && <ChallengeForm f={f} onChanged={onChanged} />}
     </article>
   );
 }
