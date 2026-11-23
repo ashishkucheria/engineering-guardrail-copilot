@@ -9,4 +9,7 @@ dist/
 .DS_Store
 eval/results/raw/
 .claude/
+<<<<<<< HEAD
 node_modules/.tmp/
+=======
+>>>>>>> phase-2-design
