@@ -13,7 +13,7 @@ Decisions made:
     version and status they ran against.
   - Phase 3 ships as three PRs, with the eval harness architecture in the first one.
 - Prompt 4 (my review of PRs #1 and #2): see "Decisions from the review of PR #1" at the end. One item is still
-  open: how to protect the first public deploy.
+  open: how to protect the first public deploy (decided in prompt 5: rate limit plus budget, §10).
 
 Platform facts this design depends on, checked against Cloudflare's docs on 2026-11-23:
 
@@ -499,18 +499,70 @@ published price.
 | 4 | LLM findings on unchanged context lines | **Chose: downgrade to a "pre-existing" suggestion** rather than drop it, so the issue stays visible but can't fail the PR. *Reviewer offered both options; change this if you prefer dropping.* | §6 |
 | 5 | A hallucinated LLM blocker blocks until an exception | **Kept as decided in prompt 3.** Blocker precision reported on its own line in the eval | §8 |
 | 6 | Schema guards; a queued review can sit forever | **Adopted.** Pending ⇔ undecided `CHECK`s; Workflow-create failure marks the review failed; stale-status reconciliation | §3, §5 |
-| 7 | LLM cost abuse via spoofable identity | **Open; needs your decision before the first public deploy.** See below | — |
+| 7 | LLM cost abuse via spoofable identity | **Decided in prompt 5: rate limit plus a daily budget** (option b below). Built in 3-B, before the first deploy | §10 |
 
-**Open: protecting the first public deploy.** Options, checked against current Cloudflare docs:
+**Options considered for item 7** (prompt 5 chose **b**):
 
-- **(a) Cloudflare Access** in front of the whole app, allowing named emails (one-time PIN). Strongest, and it
-  gives a real identity to replace the demo header. But each interviewer has to be added and has to sign in,
-  which is friction for a demo link.
-- **(b) Rate limiting plus a daily budget.** Use the Workers Rate Limiting binding for per-client burst limits
-  (10 or 60 s windows; documented as approximate and per Cloudflare location). Add a **global daily LLM budget
-  counter in D1**, which is strict because D1 has a single writer, so total spend has a hard cap regardless of
-  identity. No sign-in friction; the demo identity stays spoofable, which is documented.
-- **(c) Both:** Access on the approver and admin routes only, and (b) on the rest.
+- **(a) Cloudflare Access** in front of the whole app, allowing named emails. Strongest, and it gives a real
+  identity, but every reviewer has to be added and sign in.
+- **(b) Rate limiting plus a daily budget.** Chosen. Specified in §10.
+- **(c) Both:** Access on the approver routes, (b) on the rest.
 
-Recommendation: **(b)** for the demo, since the hard cost cap is what matters and reviewers can use the link
-directly. Durable Objects stay out unless (b) proves insufficient, as decided in prompt 2.
+---
+
+## 10. Cost and abuse protection (prompt 5)
+
+Goal: a public demo link where nobody, including someone scripting requests with forged identities, can run up
+an unbounded Workers AI bill. Identity stays the spoofable demo header (§4), so **nothing here relies on who the
+caller claims to be.**
+
+**Layer 1: per-client burst limits.** These use the Workers Rate Limiting binding, keyed by the client IP
+(`CF-Connecting-IP`), never by `X-Demo-User`. The binding is documented as approximate and counted per Cloudflare
+location, so it only smooths bursts. It isn't the cost guarantee.
+
+| Route group | Limit (per IP) |
+|---|---|
+| `POST /api/reviews` | 5 per 60 s |
+| `POST /api/findings/:id/challenge`, `POST /api/reviews/:id/chat` | 10 per 60 s |
+| everything else under `/api` | 60 per 60 s |
+
+**Layer 2: a global daily LLM budget in D1** (strict, because D1 has a single writer). A table
+`llm_budget(day TEXT, bucket TEXT, used INTEGER, PRIMARY KEY (day, bucket))` holds one counter per UTC day and
+bucket (`app` or `eval`). Every LLM-using request **reserves** its calls before any model call:
+
+```sql
+INSERT OR IGNORE INTO llm_budget (day, bucket, used) VALUES (?, ?, 0);
+UPDATE llm_budget SET used = used + ?1 WHERE day = ?2 AND bucket = ?3 AND used + ?1 <= ?4;  -- changes() = 1 → reserved
+```
+
+Both statements run in one `batch()`.
+
+- **A review reserves `chunks + 1` calls** up front (the plan is known after `validate`). If the reservation is
+  refused, the review still runs the **rules only**. Its LLM coverage goes into `coverage.skipped` with "daily AI
+  budget reached", so the verdict is `incomplete`, never a silent pass, and the UI says why.
+- **Chat and challenge reserve 1 call each.** If refused, they return `429` with `Retry-After` set to the next
+  UTC midnight.
+- Calls reserved but not used (for example a chunk that failed) aren't refunded. A refund path is a source of
+  bugs, and over-counting errs on the safe side.
+- **Budgets** are Wrangler vars, so changing them needs no code change: `DAILY_LLM_CALLS_APP` (default 1,500)
+  and `DAILY_LLM_CALLS_EVAL` (default 1,000; used only by the `EVAL_TOKEN`-protected eval endpoint).
+- **Cost ceiling:** about 5k input and 800 output tokens per call at the published Llama 3.3 price (\$0.293/M in,
+  \$2.253/M out) is roughly \$0.0033 per call, so the default app budget caps spend at about **\$5 a day**.
+
+**Observability:** every refusal is logged (`event: "rate_limited"` or `"budget_exhausted"`), and the dashboard
+shows today's budget use.
+
+**Tests** (in 3-B):
+- unit tests for the reservation decision
+- a smoke check that, with a tiny budget var, the (n+1)th LLM request is refused while rules-only reviews still
+  work
+- a smoke check for the 429 and `Retry-After` on chat
+
+**Known limits, stated in the README:**
+- One abuser can exhaust the day's budget for everyone. That's accepted: the demo degrades to rules-only, never
+  to an unbounded bill.
+- Per-IP limits can be dodged with many IPs. That's also accepted, since the global budget still holds.
+- Reading reviews stays open to any demo user (§4), so the demo must not be used with real secrets.
+
+Durable Objects stay out (prompt 2): D1's single writer gives the strict counter, and the binding gives burst
+limits.
