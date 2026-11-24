@@ -8,13 +8,16 @@
 //
 // The `llm` config calls the model through a running app (default http://localhost:5173) and spends
 // that app's eval budget: one call per case on the current cases.
+import { execSync } from "node:child_process";
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { review } from "../core/engine.ts";
+import { BASE_SEED } from "../core/llm.ts";
+import { PROMPT_VERSION } from "../core/prompts.ts";
 import { loadStandards } from "../scripts/load-standards.ts";
-import { CONFIGS, EvalAbort } from "./configs.ts";
+import { CONFIGS, EvalAbort, observed } from "./configs.ts";
 import { scoreCase, summarize, type CaseScore, type EvalCase, type Metrics } from "./score.ts";
 
 const { values } = parseArgs({
@@ -100,6 +103,7 @@ if (values.save) {
         config: config.name,
         description: config.description,
         ranAt: new Date().toISOString(),
+        run: runInfo(),
         standards: standards.map((s) => ({ id: s.id, contentHash: s.contentHash })),
         summary,
         cases: scores,
@@ -133,4 +137,28 @@ function validateCase(raw: unknown, file: string): EvalCase {
     if (typeof e.standard_id !== "string" || !Array.isArray(e.lines) || e.lines.length !== 2) fail(`bad expected entry ${JSON.stringify(e)}`);
   }
   return c;
+}
+
+/**
+ * Enough to reproduce the run: the commit (and whether the tree had uncommitted changes), the
+ * prompt version, and for model configs the model id the endpoint reported, temperature and seed.
+ */
+function runInfo() {
+  const git = (cmd: string) => {
+    try {
+      return execSync(cmd, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    } catch {
+      return null;
+    }
+  };
+  const commit = git("git rev-parse HEAD");
+  const status = git("git status --porcelain");
+  return {
+    gitCommit: commit,
+    uncommittedChanges: status === null ? null : status.length > 0,
+    promptVersion: PROMPT_VERSION,
+    ...(observed.models.size > 0
+      ? { models: [...observed.models], endpointPromptVersions: [...observed.promptVersions], temperature: 0, seed: BASE_SEED, retrySeeds: "seed + attempt - 1" }
+      : {}),
+  };
 }

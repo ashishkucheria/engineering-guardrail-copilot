@@ -6,6 +6,11 @@
 #   off         no AI; LLM standards are reported as unchecked.
 LLM_MODE=fake
 
+# The smoke test spends more fake AI calls than the app's real daily budget (20). Fake calls cost
+# nothing, so the budget is raised here. The value only applies with LLM_MODE=fake: with workers-ai the
+# app never allows more than 20 app calls a day, whatever this says.
+DAILY_LLM_CALLS_APP=60
+
 # Needed only for `npm run eval -- --config llm`. Any long random string; the eval runner reads the
 # same value from the EVAL_TOKEN environment variable.
 EVAL_TOKEN=replace-with-a-long-random-string

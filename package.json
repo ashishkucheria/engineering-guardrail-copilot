@@ -16,7 +16,7 @@
     "eval": "node eval/run.ts",
     "cf-typegen": "wrangler types --env-file types.env --strict-vars=false",
     "types:check": "wrangler types --env-file types.env --strict-vars=false --check",
-    "budget:reset:local": "wrangler d1 execute DB --local --command \"DELETE FROM llm_budget\""
+    "budget:reset:local": "wrangler d1 execute DB --local --command \"DELETE FROM llm_budget; DELETE FROM chat_quota\""
   },
   "dependencies": {
     "react": "^19.3.1",

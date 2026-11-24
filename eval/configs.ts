@@ -2,6 +2,7 @@
 // scored on. The cases, scorer and runner are the same for every configuration.
 import { readFileSync } from "node:fs";
 import { ruleDetector, type Detector } from "../core/engine.ts";
+import { PROMPT_VERSION } from "../core/prompts.ts";
 import { RULES } from "../core/rules.ts";
 import { usesRule } from "../core/standards.ts";
 import type { Finding, Standard } from "../core/types.ts";
@@ -28,11 +29,17 @@ export const CONFIGS: Record<string, EvalConfig> = {
   },
   llm: {
     name: "llm",
-    description: "Rules + Llama 3.3 70B, prompt v2, evidence verification on (the app's configuration).",
+    description: `Rules + Llama 3.3 70B, prompt ${PROMPT_VERSION}, evidence verification on (the app's configuration).`,
     detectors: (opts) => [ruleDetector, remoteLlmDetector(opts.target)],
     scope: (standards) => new Set(standards.map((s) => s.id)),
   },
 };
+
+/**
+ * What the model endpoint reported during this run (model id and prompt version per response), so
+ * the saved result records what actually ran rather than what the config says (review of PR #4).
+ */
+export const observed = { models: new Set<string>(), promptVersions: new Set<string>() };
 
 /** Thrown when the run can't continue (budget used up, bad token): the runner stops instead of scoring. */
 export class EvalAbort extends Error {}
@@ -51,7 +58,15 @@ export function remoteLlmDetector(target: string): Detector {
         headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
         body: JSON.stringify({ input: raw }),
       });
-      const data = (await res.json().catch(() => null)) as { findings?: Finding[]; skipped?: { file: string; reason: string }[]; error?: { message: string } } | null;
+      const data = (await res.json().catch(() => null)) as {
+        findings?: Finding[];
+        skipped?: { file: string; reason: string }[];
+        model?: string;
+        promptVersion?: string;
+        error?: { message: string };
+      } | null;
+      if (data?.model) observed.models.add(data.model);
+      if (data?.promptVersion) observed.promptVersions.add(data.promptVersion);
       if (res.status === 429 || res.status === 404 || res.status === 503) throw new EvalAbort(`${res.status} from ${target}: ${data?.error?.message ?? "no details"}`);
       if (!res.ok || !data?.findings) throw new Error(`eval endpoint returned ${res.status}: ${data?.error?.message ?? "no details"}`);
       return { findings: data.findings, skipped: data.skipped };

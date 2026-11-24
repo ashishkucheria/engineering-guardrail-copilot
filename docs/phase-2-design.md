@@ -1,6 +1,6 @@
 # Phase 2 design
 
-Status: **approved with decisions** (prompt 3 in `prompts.md`). Waiting for the PR to be merged.
+Status: **approved with decisions** (prompt 3 in `prompts.md`). Sections 11 and 12 record where the build differs.
 
 Decisions made:
 
@@ -603,3 +603,28 @@ cases, roughly 300 calls, and one full `llm` run already uses 22 of the day's 40
 over several days; run the `small` config on Llama 3.1 8B (about a sixth of the neurons per call); cut to 2
 configurations × 3 runs; or use a paid account for the eval. Decision (prompt 8): leave it for now and revisit once
 there is usage data from Cloudflare or errors start to appear.
+
+---
+
+## 12. Implementation notes from PR 3-C
+
+Decisions in prompt 10 (answers to three questions), and where the build differs from the design above.
+
+| # | Design | Built | Why |
+|---|---|---|---|
+| 1 | `waived_by_exception` can change after `persist`; no rule for past reviews | **Approving an exception requested from a finding waives the matching findings of that review and recomputes its verdict** (prompt 10). Later reviews are waived by the `apply-exceptions` step. Other past reviews aren't touched | Without it the developer would have to resubmit to see the waiver. The verdict is recomputed in SQL inside the same transaction as the approval, so two approvals at once can't leave a stale verdict. A review event records it ("1 finding(s) waived; verdict now pass"). |
+| 2 | Feedback: who may give it isn't specified | **The review's author or an approver** (prompt 10), the same rule as challenges | Otherwise anyone could reject other people's findings and skew the reject rates. |
+| 3 | Anyone may request an exception | Anyone may request a general one. One requested **from a finding** follows the feedback rule, and its pattern must match that finding's file | A request from a finding can waive that review once approved, so it belongs to the author. A pattern that misses the finding would waive nothing. |
+| 4 | — | An exception whose expiry passes while it's still pending can't be approved (`409`). Expiry doesn't un-waive past reviews | An approval that starts already expired would be meaningless. A past verdict stays as it was when decided. |
+| 5 | `apply-exceptions` is a separate step | Active exceptions load in `load-context` (with the standards snapshot); `finalize` applies them; an `apply-exceptions` step records what was waived | Matching is pure and deterministic. Loading in the first step pins the set of exceptions for the whole run, including Workflow replays. |
+| 6 | Chat with a free-text reply | Chat uses JSON mode with a `{reply}` schema, through the same client as detection and challenges | One client interface, and the fake model can answer it. |
+| 7 | Eval history case seeded into D1, as a hard gate | **The "rejections never suppress" hard gate is in the smoke test**: ten rejections in D1, then a new review must still flag the finding and fail | The eval calls the detector directly, and the detector has no feedback input at all, so an eval case couldn't exercise it. The smoke test runs the whole path against D1. |
+| 8 | 4 configurations × 3 runs | **`rules` against `llm`, one run each** (prompt 10), in `eval/RESULTS.md` | The free allocation fits one AI run a day. The size-cap case was also dropped: through the AI it costs about 20 calls, and unit and smoke tests cover the caps. |
+| 9 | — | `.dev.vars.example` raises `DAILY_LLM_CALLS_APP` to 60 for fake mode. **Only the fake model honours a value above 20** (review of PR #4) | The smoke test makes more fake AI calls than the real budget of 20. Capping real modes at 20 means a copied `.dev.vars` can't overspend after switching to `workers-ai`. |
+| 10 | — | Path globs are matched by a linear-time set-of-positions walk, not a regex (review of PR #4) | The pattern comes from users. A regex built from `*a*a*a*a*b` backtracks exponentially and hung the Worker in the reviewer's test. |
+| 11 | No way to end an approved exception early | **Revoke** (`POST /api/exceptions/:id/revoke`): approvers only, note required, conditional on the exception still being active. Past waivers stay; the source review gets an event | One wrong approval would otherwise waive every review until it expired. Not un-waiving keeps a past verdict as it was when decided (item 4). |
+| 12 | Any approver may approve any exception | Broad patterns (wildcards and slashes only) and blocker standards stay waivable, but **approving them needs a decision note** (prompt 11). The note is in the review event | The approver has to say why on the record; a narrow exception to a major or minor standard stays one click. |
+| 13 | No limit on requests | At most 5 unexpired pending requests per person, checked inside the INSERT | Nobody can flood the approvers' queue. |
+| 14 | Chat open to any signed-in user | **Chat follows the feedback rule** (author or approver), 5 questions per person per UTC day (`chat_quota`, counted atomically), and it stops 5 calls before the app budget runs out (review of PR #4, item 3). The prompt sends at most 40 findings, worst first, with clipped text, and says how many it left out | Otherwise one person could spend the day's budget on chat in minutes, after which reviews would be rules-only and challenges refused. The size cap keeps a 200-finding review well inside the model's context window. |
+| 15 | — | Dashboard: "violations waived" and the most-frequent-standards table count violations only, the latter unwaived; exceptions add a revoked count | Suggestions were inflating both numbers. |
+| 16 | — | Saved eval results record the git commit (and whether the tree had uncommitted changes), the prompt version, and for model runs the model id the endpoint reported, temperature and seed | Enough to reproduce a run. The 2026-11-24 results predate this and don't have it. |

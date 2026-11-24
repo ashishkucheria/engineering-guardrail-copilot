@@ -75,6 +75,8 @@ export interface Finding {
    * labelled "pre-existing", so a change can't fail for code it didn't touch (design §6).
    */
   preExisting?: boolean;
+  /** Id of the approved, unexpired exception that waives this finding. Waived findings don't count toward the verdict. */
+  waivedBy?: string | null;
 }
 
 export interface User {

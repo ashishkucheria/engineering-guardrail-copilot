@@ -1,4 +1,4 @@
-// End-to-end API smoke test (PRs 3-A and 3-B). Runs against a live server started with the fake
+// End-to-end API smoke test (PRs 3-A, 3-B and 3-C). Runs against a live server started with the fake
 // model, so it makes no AI calls and costs nothing:
 //   cp .dev.vars.example .dev.vars   (LLM_MODE=fake), then npm run db:setup:local && npm run dev
 //   npm run smoke                    (or: node scripts/smoke.mjs http://host:port)
@@ -287,6 +287,221 @@ await check("history lists the reviews, newest first", async () => {
   assert(r.data[0].createdAt >= r.data[1].createdAt, "not newest first");
 });
 
+// --- Feedback, exceptions, chat and the dashboard (3-C) --------------------------------------
+
+const APPROVER2 = "appr-lena";
+const SECRET_LINE = 'const apiKey = "abcd1234abcd1234";';
+/** A diff adding one secret to a file only this run uses, so exceptions made here can't affect other checks or later runs. */
+const secretDiff = (path) => [`--- a/${path}`, `+++ b/${path}`, "@@ -0,0 +1,1 @@", `+${SECRET_LINE}`].join("\n") + "\n";
+const uniquePath = (tag) => `smoke/${tag}-${Date.now().toString(36)}${randomInt(1e6)}/keys.ts`;
+const secOf = (review) => review.findings.find((f) => f.standardId === "SEC-001" && f.source === "rule");
+const dash = async () => (await api("GET", "/api/dashboard", { user: DEV })).data;
+/** core/verdict.ts computeVerdict, restated, to check the verdict the database recomputes after a waiver. */
+const expectedVerdict = (r) => {
+  const v = r.findings.filter((f) => f.classification === "violation" && !f.waivedBy);
+  if (v.some((f) => f.severity === "blocker")) return "fail";
+  if (r.coverage.skipped.length) return "incomplete";
+  return v.length ? "warn" : "pass";
+};
+
+await check("feedback: author-only, a reason to reject, recorded without touching the verdict", async () => {
+  const r = await reviewOf(secretDiff(uniquePath("fb")));
+  const f = secOf(r);
+  const path = `/api/findings/${encodeURIComponent(f.id)}/feedback`;
+  const other = await api("POST", path, { user: DEV2, body: { action: "reject", reason: "not mine" } });
+  assert(other.status === 403 && other.data.error.code === "forbidden", `another developer: ${other.status}`);
+  assert((await api("POST", path, { user: DEV, body: { action: "reject" } })).status === 400, "reject without a reason should be 400");
+  assert((await api("POST", path, { user: DEV, body: { action: "ignore" } })).status === 400, "unknown action should be 400");
+  const rej = await api("POST", path, { user: DEV, body: { action: "reject", reason: "It's a fixture." } });
+  assert(rej.status === 200 && rej.data.disposition === "rejected" && rej.data.classification === "violation", `reject: ${rej.status} ${JSON.stringify(rej.data)}`);
+  const after = (await api("GET", `/api/reviews/${r.id}`, { user: DEV })).data;
+  assert(after.verdict === r.verdict && r.verdict === "fail", `verdict changed from ${r.verdict} to ${after.verdict}`);
+  const acc = await api("POST", path, { user: APPROVER, body: { action: "accept" } });
+  assert(acc.status === 200 && acc.data.disposition === "accepted", "an approver can accept it");
+});
+
+await check("HARD GATE: ten rejections never suppress a finding; history is shown, the verdict still fails", async () => {
+  const file = uniquePath("hist");
+  const first = await reviewOf(secretDiff(file));
+  const f = secOf(first);
+  for (let i = 0; i < 10; i++) {
+    const r = await api("POST", `/api/findings/${encodeURIComponent(f.id)}/feedback`, { user: DEV, body: { action: "reject", reason: `false positive #${i + 1}, please stop flagging this` } });
+    assert(r.status === 200, `rejection ${i + 1}: ${r.status}`);
+  }
+  const again = await reviewOf(secretDiff(file));
+  const g = secOf(again);
+  assert(g && g.classification === "violation" && !g.waivedBy && again.verdict === "fail", `after 10 rejections: ${JSON.stringify(g)} verdict ${again.verdict}`);
+  const h = again.history.find((x) => x.standardId === "SEC-001");
+  assert(h && h.rejected >= 1 && h.recentReasons.some((x) => x.reason.startsWith("false positive #10")), `history ${JSON.stringify(h)}`);
+});
+
+let excReview;
+let excId;
+await check("exception requests are validated: 90-day limit, the pattern must match, the author's findings only", async () => {
+  excReview = await reviewOf(secretDiff(uniquePath("exc")));
+  const f = secOf(excReview);
+  const body = { finding_id: f.id, standard_id: "SEC-001", path_pattern: f.file, justification: "Demo key that only works against the local mock.", expires_in_days: 30 };
+  assert((await api("POST", "/api/exceptions", { user: DEV, body: { ...body, expires_in_days: 91 } })).status === 400, "91 days should be 400");
+  assert((await api("POST", "/api/exceptions", { user: DEV, body: { ...body, expires_in_days: undefined } })).status === 400, "no expiry should be 400");
+  assert((await api("POST", "/api/exceptions", { user: DEV, body: { ...body, path_pattern: "other/**" } })).status === 400, "a pattern that misses the finding should be 400");
+  assert((await api("POST", "/api/exceptions", { user: DEV, body: { ...body, standard_id: "MNT-001" } })).status === 400, "a different standard should be 400");
+  assert((await api("POST", "/api/exceptions", { user: DEV2, body })).status === 403, "another developer can't request one from this finding");
+  assert((await api("POST", "/api/exceptions", { user: DEV, body: { ...body, finding_id: "nope" } })).status === 404, "unknown finding should be 404");
+  const t0 = Date.now();
+  const evil = await api("POST", "/api/exceptions", { user: DEV, body: { ...body, path_pattern: "*a*a*a*a*a*a*a*a*a*a*a*a*b" } });
+  assert(evil.status === 400 && Date.now() - t0 < 2_000, `a pathological pattern must be rejected quickly: ${evil.status} after ${Date.now() - t0} ms`);
+  const ok = await api("POST", "/api/exceptions", { user: DEV, body });
+  assert(ok.status === 201 && ok.data.status === "pending" && ok.data.state === "pending" && ok.data.requestedBy.id === DEV, `create: ${ok.status} ${JSON.stringify(ok.data)}`);
+  excId = ok.data.id;
+  const days = (Date.parse(ok.data.expiresAt) - Date.parse(ok.data.createdAt)) / 86_400_000;
+  assert(Math.abs(days - 30) < 0.001, `expires after ${days} days`);
+  assert((await api("POST", "/api/exceptions", { user: DEV, body })).status === 409, "a second pending request for the same finding should be 409");
+  const pending = (await api("GET", "/api/exceptions?status=pending", { user: DEV2 })).data;
+  assert(pending.some((e) => e.id === excId), "the request should be listed as pending");
+});
+
+await check("approval rules: a developer can't approve (403); two approvers at once give one approval and one 409", async () => {
+  const dev = await api("POST", `/api/exceptions/${excId}/decision`, { user: DEV, body: { decision: "approve" } });
+  assert(dev.status === 403 && dev.data.error.code === "forbidden", `developer: ${dev.status}`);
+  const bare = await api("POST", `/api/exceptions/${excId}/decision`, { user: APPROVER, body: { decision: "approve" } });
+  assert(bare.status === 400 && bare.data.error.code === "note_required" && /blocker/.test(bare.data.error.message), `SEC-001 without a note: ${bare.status} ${JSON.stringify(bare.data)}`);
+  const both = await Promise.all([APPROVER, APPROVER2].map((u) => api("POST", `/api/exceptions/${excId}/decision`, { user: u, body: { decision: "approve", note: `ok from ${u}` } })));
+  const statuses = both.map((r) => r.status).sort();
+  assert(JSON.stringify(statuses) === JSON.stringify([200, 409]), `concurrent approvals: ${statuses}`);
+  const ok = both.find((r) => r.status === 200).data;
+  assert(ok.status === "approved" && ok.state === "active" && ok.decidedBy && ok.decidedAt, `approved: ${JSON.stringify(ok)}`);
+  assert((await api("POST", `/api/exceptions/${excId}/decision`, { user: APPROVER, body: { decision: "deny" } })).status === 409, "a decided exception can't be decided again");
+});
+
+await check("approval waives the source review: the finding stays, the verdict is recomputed, an event is recorded", async () => {
+  const r = (await api("GET", `/api/reviews/${excReview.id}`, { user: DEV })).data;
+  const f = secOf(r);
+  assert(f.waivedBy === excId && f.waiver.id === excId && f.classification === "violation" && f.severity === "blocker", `finding ${JSON.stringify(f)}`);
+  assert(excReview.verdict === "fail" && r.verdict === expectedVerdict(r) && r.verdict !== "fail", `verdict ${excReview.verdict} → ${r.verdict}, expected ${expectedVerdict(r)}`);
+  const events = r.events.filter((e) => e.step === "exception");
+  assert(events.length === 1 && events[0].detail.includes(`${excId} approved`) && events[0].detail.includes("1 finding(s) waived") && events[0].detail.includes("Note: ok from"), `events ${JSON.stringify(events)}`);
+});
+
+await check("a later review of the same path is waived by the apply-exceptions step; another path is not", async () => {
+  const again = await reviewOf(secretDiff(secOf(excReview).file));
+  assert(secOf(again).waivedBy === excId && again.verdict !== "fail", `waived ${secOf(again).waivedBy}, verdict ${again.verdict}`);
+  assert(again.events.some((e) => e.step === "apply-exceptions" && e.detail.includes(excId)), "missing apply-exceptions event");
+  const elsewhere = await reviewOf(secretDiff(uniquePath("elsewhere")));
+  assert(!secOf(elsewhere).waivedBy && elsewhere.verdict === "fail", "an exception must not leak to other paths");
+});
+
+await check("revoke: approvers only, with a note; past waivers stay, later reviews aren't waived, recorded on the review", async () => {
+  const path = `/api/exceptions/${excId}/revoke`;
+  assert((await api("POST", path, { user: DEV, body: { note: "please" } })).status === 403, "a developer can't revoke");
+  assert((await api("POST", path, { user: APPROVER, body: {} })).status === 400, "revoking needs a note");
+  const both = await Promise.all([APPROVER, APPROVER2].map((u) => api("POST", path, { user: u, body: { note: `wrong call, ${u}` } })));
+  assert(JSON.stringify(both.map((r) => r.status).sort()) === JSON.stringify([200, 409]), `concurrent revokes: ${both.map((r) => r.status)}`);
+  const ok = both.find((r) => r.status === 200).data;
+  assert(ok.status === "revoked" && ok.state === "revoked" && ok.revokedBy && ok.revokeNote.startsWith("wrong call") && ok.decidedBy, `revoked: ${JSON.stringify(ok)}`);
+  const r = (await api("GET", `/api/reviews/${excReview.id}`, { user: DEV })).data;
+  assert(secOf(r).waivedBy === excId && secOf(r).waiver.revokedAt, "the source review keeps its waiver, marked revoked");
+  assert(r.events.some((e) => e.step === "exception" && e.detail.includes(`${excId} revoked`)), "the revocation should be recorded on the source review");
+  const again = await reviewOf(secretDiff(secOf(excReview).file));
+  assert(!secOf(again).waivedBy && again.verdict === "fail", `after revoking, a new review must not be waived: ${secOf(again).waivedBy} ${again.verdict}`);
+  assert((await api("GET", "/api/exceptions?status=revoked", { user: DEV })).data.some((x) => x.id === excId), "listed as revoked");
+});
+
+await check(`a person can have at most 5 pending exception requests (409 after that)`, async () => {
+  const base = { standard_id: "MNT-001", justification: "Queue cap check, denied right after.", expires_in_days: 1 };
+  const made = [];
+  let refused = null;
+  for (let i = 0; i < 7 && !refused; i++) {
+    const e = await api("POST", "/api/exceptions", { user: DEV2, body: { ...base, path_pattern: `${uniquePath("cap").replace(/\/keys\.ts$/, "")}/**` } });
+    if (e.status === 201) made.push(e.data.id);
+    else refused = e;
+  }
+  // Clean up so a re-run today isn't blocked by these.
+  for (const id of made) await api("POST", `/api/exceptions/${id}/decision`, { user: APPROVER, body: { decision: "deny", note: "smoke cleanup" } });
+  assert(refused && refused.status === 409 && refused.data.error.code === "too_many_pending", `refused: ${refused?.status} ${JSON.stringify(refused?.data)}`);
+  assert(made.length <= 5, `${made.length} pending requests were accepted`);
+});
+
+await check("no self-approval, even for approvers; another approver can deny", async () => {
+  const body = { standard_id: "MNT-001", path_pattern: `${uniquePath("self").replace(/\/keys\.ts$/, "")}/**`, justification: "Generated code with upstream TODOs.", expires_in_days: 7 };
+  const e = await api("POST", "/api/exceptions", { user: APPROVER, body });
+  assert(e.status === 201, `create: ${e.status}`);
+  const self = await api("POST", `/api/exceptions/${e.data.id}/decision`, { user: APPROVER, body: { decision: "approve" } });
+  assert(self.status === 403, `self-approval: ${self.status}`);
+  const deny = await api("POST", `/api/exceptions/${e.data.id}/decision`, { user: APPROVER2, body: { decision: "deny", note: "Fix the TODOs instead." } });
+  assert(deny.status === 200 && deny.data.state === "denied" && deny.data.decisionNote === "Fix the TODOs instead.", `deny: ${deny.status} ${JSON.stringify(deny.data)}`);
+  assert((await api("GET", "/api/exceptions?status=denied", { user: DEV })).data.some((x) => x.id === e.data.id), "should be listed as denied");
+  assert((await api("GET", "/api/exceptions?status=bogus", { user: DEV })).status === 400, "unknown status filter should be 400");
+});
+
+await check("chat: the author or an approver only; answers, is stored with who asked, and spends one AI call", async () => {
+  const before = (await api("GET", "/api/meta")).data.budget.app.used;
+  const other = await api("POST", `/api/reviews/${excReview.id}/chat`, { user: DEV2, body: { message: "Has SEC-001 come up before?" } });
+  assert(other.status === 403 && other.data.error.code === "forbidden", `another developer: ${other.status}`);
+  assert((await api("GET", "/api/meta")).data.budget.app.used === before, "a refused chat must spend nothing");
+  const c = await api("POST", `/api/reviews/${excReview.id}/chat`, { user: DEV, body: { message: "Has SEC-001 come up before?" } });
+  assert(c.status === 200 && /Fake model: this review has \d+ finding/.test(c.data.reply), `chat: ${c.status} ${JSON.stringify(c.data)}`);
+  assert(c.data.messages.length === 2 && c.data.messages[0].user.id === DEV && c.data.messages[1].role === "assistant", `messages ${JSON.stringify(c.data.messages)}`);
+  assert((await api("GET", "/api/meta")).data.budget.app.used === before + 1, "a chat message should reserve one AI call");
+  const r = (await api("GET", `/api/reviews/${excReview.id}`, { user: DEV })).data;
+  assert(r.messages.length === 2, "the chat should be stored on the review");
+  assert(r.verdict === expectedVerdict(r) && secOf(r).waivedBy === excId, "chat must not change anything");
+  assert((await api("POST", `/api/reviews/${excReview.id}/chat`, { user: DEV, body: { message: " " } })).status === 400, "an empty message should be 400");
+  assert((await api("POST", "/api/reviews/nope/chat", { user: DEV, body: { message: "hi" } })).status === 404, "unknown review should be 404");
+});
+
+await check("chat: each person gets 5 questions a day, then 429", async () => {
+  const statuses = [];
+  for (let i = 0; i < 6; i++) {
+    const c = await api("POST", `/api/reviews/${excReview.id}/chat`, { user: APPROVER2, body: { message: `question ${i + 1}` } });
+    statuses.push(c.status === 429 ? c.data.error.code : c.status);
+  }
+  assert(JSON.stringify(statuses) === JSON.stringify([200, 200, 200, 200, 200, "chat_quota"]), `statuses ${JSON.stringify(statuses)}`);
+});
+
+await check("chat stops 5 calls before the daily budget runs out, so reviews keep some", async () => {
+  const limit = (await api("GET", "/api/meta")).data.budget.app.limit;
+  const code = "export const go = () => fetch(\"https://x.example/go\");\n";
+  for (let i = 0; i < limit && (await api("GET", "/api/meta")).data.budget.app.used < limit - 5; i++) await reviewOf(code);
+  const used = (await api("GET", "/api/meta")).data.budget.app.used;
+  assert(used >= limit - 5 && used < limit, `set-up: used ${used} of ${limit}`);
+  const chat = await api("POST", `/api/reviews/${excReview.id}/chat`, { user: APPROVER, body: { message: "still there?" } });
+  assert(chat.status === 429 && chat.data.error.code === "budget_exhausted", `chat with ${limit - used} calls left: ${chat.status}`);
+  const r = await reviewOf(code);
+  assert(!r.events.some((e) => e.step === "budget" && e.outcome === "skipped"), "a review must still get the AI in the headroom");
+});
+
+await check("dashboard numbers match the database, step by step", async () => {
+  const d0 = await dash();
+  const r = await reviewOf(secretDiff(uniquePath("dash")));
+  const blockers = r.findings.filter((f) => f.classification === "violation" && f.severity === "blocker").length;
+  const d1 = await dash();
+  assert(d1.totalReviews === d0.totalReviews + 1 && d1.verdicts.fail === d0.verdicts.fail + 1, `reviews ${d0.totalReviews}→${d1.totalReviews}, fail ${d0.verdicts.fail}→${d1.verdicts.fail}`);
+  assert(d1.violationsBySeverity.blocker === d0.violationsBySeverity.blocker + blockers, `blockers ${d0.violationsBySeverity.blocker}→${d1.violationsBySeverity.blocker}`);
+  const f = secOf(r);
+  await api("POST", `/api/findings/${encodeURIComponent(f.id)}/feedback`, { user: DEV, body: { action: "reject", reason: "dashboard check" } });
+  const d2 = await dash();
+  assert(d2.dispositions.rejected === d1.dispositions.rejected + 1 && d2.dispositions.open === d1.dispositions.open - 1, `dispositions ${JSON.stringify(d1.dispositions)}→${JSON.stringify(d2.dispositions)}`);
+  const e = await api("POST", "/api/exceptions", { user: DEV, body: { finding_id: f.id, standard_id: "SEC-001", path_pattern: f.file, justification: "Dashboard check exception.", expires_in_days: 1 } });
+  const d3 = await dash();
+  assert(d3.exceptions.pending === d2.exceptions.pending + 1, "pending +1");
+  const top3 = d3.topStandards.find((s) => s.id === "SEC-001")?.count ?? 0;
+  await api("POST", `/api/exceptions/${e.data.id}/decision`, { user: APPROVER, body: { decision: "approve", note: "dashboard check" } });
+  const d4 = await dash();
+  const top4 = d4.topStandards.find((s) => s.id === "SEC-001")?.count ?? 0;
+  assert(top4 === top3 - 1, `topStandards counts unwaived violations: SEC-001 ${top3}→${top4}`);
+  const after = (await api("GET", `/api/reviews/${r.id}`, { user: DEV })).data;
+  assert(d4.exceptions.pending === d2.exceptions.pending && d4.exceptions.active === d3.exceptions.active + 1, `exceptions ${JSON.stringify(d3.exceptions)}→${JSON.stringify(d4.exceptions)}`);
+  assert(d4.waived === d3.waived + 1 && d4.violationsBySeverity.blocker === d3.violationsBySeverity.blocker - 1, `waived ${d3.waived}→${d4.waived}, blockers ${d3.violationsBySeverity.blocker}→${d4.violationsBySeverity.blocker}`);
+  assert(d4.verdicts.fail === d3.verdicts.fail - 1 && d4.verdicts[after.verdict] === d3.verdicts[after.verdict] + 1, `verdicts ${JSON.stringify(d3.verdicts)}→${JSON.stringify(d4.verdicts)}`);
+  const meta = (await api("GET", "/api/meta")).data;
+  assert(d4.budget.app.used === meta.budget.app.used && d4.budget.app.limit === meta.budget.app.limit, "budget should match /api/meta");
+  const rate = d4.rejectRateByStandard.find((x) => x.id === "SEC-001");
+  assert(rate && rate.n > 0 && rate.rate > 0 && rate.rate <= 1, `reject rate ${JSON.stringify(rate)}`);
+  await api("POST", `/api/exceptions/${e.data.id}/revoke`, { user: APPROVER2, body: { note: "dashboard check" } });
+  const d5 = await dash();
+  assert(d5.exceptions.active === d4.exceptions.active - 1 && d5.exceptions.revoked === d4.exceptions.revoked + 1 && d5.waived === d4.waived, `after revoke ${JSON.stringify(d4.exceptions)}→${JSON.stringify(d5.exceptions)}, waived ${d4.waived}→${d5.waived}`);
+});
+
 // --- Cost protection (design §10) ------------------------------------------------------------
 
 await check("per-IP rate limit: the 6th review request in a minute from one IP gets 429 with Retry-After", async () => {
@@ -314,7 +529,7 @@ await check("rule findings are capped inside the Workflow step: 4,000 TODOs give
   assert(r.events.some((e) => e.step === "rules" && /3800 over the cap dropped/.test(e.detail)), "the rules step should report the drop");
 });
 
-await check("daily AI budget: once used up, reviews run rules only (incomplete) and challenges get 429", async () => {
+await check("daily AI budget: once used up, reviews run rules only (incomplete); challenges and chat get 429", async () => {
   const m = (await api("GET", "/api/meta")).data.budget.app;
   let refused = null;
   for (let i = 0; i <= m.limit - m.used + 1 && !refused; i++) {
@@ -330,6 +545,9 @@ await check("daily AI budget: once used up, reviews run rules only (incomplete) 
   const f = refused.findings[0];
   const c = await api("POST", `/api/findings/${encodeURIComponent(f.id)}/challenge`, { user: DEV, body: { argument: "test" } });
   assert(c.status === 429 && c.data.error.code === "budget_exhausted" && Number(c.headers.get("retry-after")) > 0, `got ${c.status} ${JSON.stringify(c.data)}`);
+  const chat = await api("POST", `/api/reviews/${refused.id}/chat`, { user: DEV, body: { message: "why?" } });
+  assert(chat.status === 429 && chat.data.error.code === "budget_exhausted" && Number(chat.headers.get("retry-after")) > 0, `chat got ${chat.status}`);
+  assert((await api("GET", `/api/reviews/${refused.id}`, { user: DEV })).data.messages.length === 0, "a refused chat must store nothing");
   const after = (await api("GET", "/api/meta")).data.budget.app;
   assert(after.used <= after.limit, `budget overshot: ${after.used} > ${after.limit}`);
 });

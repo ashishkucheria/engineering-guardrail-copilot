@@ -1,11 +1,12 @@
 // API Worker. Static assets (the React app) are served by the assets binding; only /api/* reaches
 // this code (see run_worker_first in wrangler.jsonc). Reviews run in the ReviewWorkflow.
-import type { ChallengeResult, MetaView } from "../core/api-types.ts";
+import type { ChallengeResult, ChatResult, DashboardView, ExceptionView, MetaView } from "../core/api-types.ts";
 import { renderLine } from "../core/chunk.ts";
 import { MAX_INPUT_BYTES, parseInput } from "../core/diff.ts";
+import { approvalNoteRequirement, expiresAt, globMatch, MAX_PENDING_PER_USER, validateExceptionRequest } from "../core/exceptions.ts";
 import { llmDetector, parseJsonResponse } from "../core/llm.ts";
-import { canChallenge, canToggleStandard } from "../core/policy.ts";
-import { buildChallengeMessages, CHALLENGE_SCHEMA, PROMPT_VERSION } from "../core/prompts.ts";
+import { canChallenge, canChat, canDecideException, canGiveFeedback, canRequestException, canRevokeException, canToggleStandard, type Decision } from "../core/policy.ts";
+import { buildChallengeMessages, buildChatMessages, CHALLENGE_SCHEMA, CHAT_SCHEMA, PROMPT_VERSION } from "../core/prompts.ts";
 import { redactSecrets } from "../core/rules.ts";
 import { snapshotOf } from "../core/standards.ts";
 import type { User } from "../core/types.ts";
@@ -20,6 +21,13 @@ const MAX_JSON_ESCAPE_FACTOR = 6;
 /** A review still queued or running after this long is checked against its Workflow (design §5). */
 const STALE_AFTER_MS = 15 * 60 * 1000;
 const MAX_ARGUMENT_CHARS = 2_000;
+const MAX_REASON_CHARS = 1_000;
+const MAX_CHAT_CHARS = 1_000;
+const MAX_NOTE_CHARS = 1_000;
+/** Chat questions one user may ask per UTC day, across all reviews. */
+const CHAT_QUESTIONS_PER_USER_PER_DAY = 5;
+/** App calls chat may never use, kept for reviews and challenges (review of PR #4, item 3). */
+const CHAT_HEADROOM = 5;
 const CHALLENGE_CONTEXT_LINES = 10;
 
 type Handler = (ctx: { req: Request; env: Env; params: Record<string, string>; url: URL }) => Promise<Response>;
@@ -152,7 +160,7 @@ route("GET", "/api/reviews/:id", async ({ req, env, params }) => {
   }
   const r = await db.getReview(env.DB, id);
   if (!r) throw new ApiError(404, "not_found", "No such review.");
-  return json({ ...r, viewerCanChallenge: canChallenge(user, r.author.id).ok });
+  return json({ ...r, viewerCanChallenge: canChallenge(user, r.author.id).ok, viewerCanGiveFeedback: canGiveFeedback(user, r.author.id).ok });
 });
 
 // --- Challenges -----------------------------------------------------------------------------
@@ -205,6 +213,182 @@ route("POST", "/api/findings/:id/challenge", async ({ req, env, params }) => {
   return json({ assessment, reasoning, finding } satisfies ChallengeResult);
 });
 
+// --- Feedback -------------------------------------------------------------------------------
+
+/** Accept or reject a finding (author or approver). A signal for people only: it never changes the finding or the verdict. */
+route("POST", "/api/findings/:id/feedback", async ({ req, env, params }) => {
+  const user = await requireUser(req, env);
+  const body = await readJson(req, 4 * MAX_REASON_CHARS + 1_000);
+  const action = body.action;
+  if (action !== "accept" && action !== "reject") throw new ApiError(400, "invalid_body", '"action" must be "accept" or "reject".');
+  const reason = typeof body.reason === "string" ? body.reason.trim() : "";
+  if (action === "reject" && (!reason || reason.length > MAX_REASON_CHARS)) {
+    throw new ApiError(400, "invalid_body", `Rejecting needs a "reason" of 1 to ${MAX_REASON_CHARS} characters.`);
+  }
+  const f = await db.getFindingForChallenge(env.DB, params.id!);
+  if (!f) throw new ApiError(404, "not_found", "No such finding.");
+  assertAllowed(canGiveFeedback(user, f.reviewAuthorId));
+  await db.recordFeedback(env.DB, { findingId: f.id, userId: user.id, action, reason: reason ? redactSecrets(reason) : null, at: new Date().toISOString() });
+  console.log(JSON.stringify({ event: "finding_feedback", finding: f.id, action, by: user.id }));
+  return json((await db.getReview(env.DB, f.reviewId))!.findings.find((x) => x.id === f.id)!);
+});
+
+// --- Exceptions -----------------------------------------------------------------------------
+
+route("POST", "/api/exceptions", async ({ req, env }) => {
+  const user = await requireUser(req, env);
+  const v = validateExceptionRequest(await readJson(req, 4 * 2_000 + 2_000));
+  if (!v.ok) throw new ApiError(400, "invalid_body", v.message);
+  const r = v.value;
+  const standard = await db.getStandard(env.DB, r.standardId);
+  if (!standard) throw new ApiError(404, "not_found", `No standard ${r.standardId}.`);
+  if (standard.retiredAt) throw new ApiError(409, "retired", `${standard.id} was retired, so it needs no exception.`);
+  let source: db.FindingForChallenge | null = null;
+  if (r.findingId) {
+    source = await db.getFindingForChallenge(env.DB, r.findingId);
+    if (!source) throw new ApiError(404, "not_found", "No such finding.");
+    if (source.standardId !== r.standardId) throw new ApiError(400, "invalid_body", `That finding is for ${source.standardId}, not ${r.standardId}.`);
+    if (!globMatch(r.pathPattern, source.file)) throw new ApiError(400, "invalid_body", `The pattern "${r.pathPattern}" doesn't match the finding's file ${source.file}.`);
+  }
+  assertAllowed(canRequestException(user, source?.reviewAuthorId ?? null));
+  if (source && (await db.hasPendingExceptionFor(env.DB, source.id))) throw new ApiError(409, "already_requested", "An exception for this finding is already waiting for a decision.");
+  const now = new Date();
+  const id = `EXC-${crypto.randomUUID().slice(0, 8)}`;
+  const inserted = await db.insertException(env.DB, {
+    id,
+    standardId: r.standardId,
+    pathPattern: r.pathPattern,
+    justification: redactSecrets(r.justification),
+    sourceFinding: source?.id ?? null,
+    requestedBy: user.id,
+    expiresAt: expiresAt(now, r.expiresInDays),
+    createdAt: now.toISOString(),
+  }, MAX_PENDING_PER_USER);
+  if (!inserted) {
+    throw new ApiError(409, "too_many_pending", `You already have ${MAX_PENDING_PER_USER} exception requests waiting for a decision. Wait for those first.`);
+  }
+  console.log(JSON.stringify({ event: "exception_requested", exception: id, standard: r.standardId, pattern: r.pathPattern, by: user.id }));
+  return json(await db.getException(env.DB, id, now), 201);
+});
+
+const EXCEPTION_STATES = new Set<ExceptionView["state"]>(["pending", "active", "expired", "denied", "revoked"]);
+
+route("GET", "/api/exceptions", async ({ req, env, url }) => {
+  await requireUser(req, env);
+  const state = url.searchParams.get("status");
+  if (state && !EXCEPTION_STATES.has(state as ExceptionView["state"])) throw new ApiError(400, "invalid_query", '"status" must be pending, active, expired, denied or revoked.');
+  return json(await db.listExceptions(env.DB, (state as ExceptionView["state"] | null) ?? null, new Date()));
+});
+
+route("POST", "/api/exceptions/:id/decision", async ({ req, env, params }) => {
+  const user = await requireUser(req, env);
+  const body = await readJson(req, 4 * MAX_NOTE_CHARS + 1_000);
+  if (body.decision !== "approve" && body.decision !== "deny") throw new ApiError(400, "invalid_body", '"decision" must be "approve" or "deny".');
+  const note = typeof body.note === "string" && body.note.trim() ? body.note.trim().slice(0, MAX_NOTE_CHARS) : null;
+  const now = new Date();
+  const e = await db.getException(env.DB, params.id!, now);
+  if (!e) throw new ApiError(404, "not_found", "No such exception.");
+  assertAllowed(canDecideException(user, { requestedBy: e.requestedBy.id, status: e.status }));
+  const decision = body.decision === "approve" ? "approved" : "denied";
+  if (decision === "approved" && Date.parse(e.expiresAt) <= now.getTime()) throw new ApiError(409, "conflict", "This request expired before it was decided.");
+  if (decision === "approved" && !note) {
+    // Broad patterns and blocker standards stay waivable, but only with a reason on record (prompt 11).
+    const standard = await db.getStandard(env.DB, e.standardId);
+    const needs = approvalNoteRequirement(e.pathPattern, standard?.severity ?? "blocker");
+    if (needs) throw new ApiError(400, "note_required", needs);
+  }
+  // Approving a request made from a finding also waives the matching findings of that review and
+  // recomputes its verdict (prompt 10). Later reviews pick the exception up in apply-exceptions.
+  let waive: { reviewId: string; findingIds: string[] } | null = null;
+  if (decision === "approved" && e.sourceFinding) {
+    const rows = await db.findingsForWaiver(env.DB, e.sourceFinding.reviewId);
+    waive = { reviewId: e.sourceFinding.reviewId, findingIds: rows.filter((f) => !f.waivedBy && f.standardId === e.standardId && globMatch(e.pathPattern, f.file)).map((f) => f.id) };
+  }
+  const decided = await db.decideException(env.DB, { id: e.id, decision, by: { id: user.id, name: user.name }, note: note ? redactSecrets(note) : null, at: now.toISOString(), waive });
+  if (!decided) throw new ApiError(409, "conflict", "This exception was decided by someone else in the meantime.");
+  console.log(JSON.stringify({ event: "exception_decided", exception: e.id, decision, by: user.id, waived: waive?.findingIds.length ?? 0 }));
+  return json(await db.getException(env.DB, e.id, now));
+});
+
+/** End an approved exception early (review of PR #4, item 2). Findings it already waived stay waived. */
+route("POST", "/api/exceptions/:id/revoke", async ({ req, env, params }) => {
+  const user = await requireUser(req, env);
+  const body = await readJson(req, 4 * MAX_NOTE_CHARS + 1_000);
+  const note = typeof body.note === "string" ? body.note.trim() : "";
+  if (!note || note.length > MAX_NOTE_CHARS) throw new ApiError(400, "invalid_body", `Revoking needs a "note" of 1 to ${MAX_NOTE_CHARS} characters saying why.`);
+  const now = new Date();
+  const e = await db.getException(env.DB, params.id!, now);
+  if (!e) throw new ApiError(404, "not_found", "No such exception.");
+  assertAllowed(canRevokeException(user, { status: e.status, expiresAt: e.expiresAt }, now));
+  const revoked = await db.revokeException(env.DB, { id: e.id, by: { id: user.id, name: user.name }, note: redactSecrets(note), at: now.toISOString() });
+  if (!revoked) throw new ApiError(409, "conflict", "This exception changed in the meantime (revoked by someone else, or expired).");
+  console.log(JSON.stringify({ event: "exception_revoked", exception: e.id, by: user.id }));
+  return json(await db.getException(env.DB, e.id, now));
+});
+
+// --- Chat -----------------------------------------------------------------------------------
+
+/** Advisory chat about one review (design §6). It has no tools: it can't change findings, verdicts or exceptions. */
+route("POST", "/api/reviews/:id/chat", async ({ req, env, params }) => {
+  const user = await requireUser(req, env);
+  const body = await readJson(req, 4 * MAX_CHAT_CHARS + 1_000);
+  const question = typeof body.message === "string" ? body.message.trim() : "";
+  if (!question || question.length > MAX_CHAT_CHARS) throw new ApiError(400, "invalid_body", `"message" must be 1 to ${MAX_CHAT_CHARS} characters.`);
+  const r = await db.getReview(env.DB, params.id!);
+  if (!r) throw new ApiError(404, "not_found", "No such review.");
+  assertAllowed(canChat(user, r.author.id));
+  if (r.status !== "complete") throw new ApiError(409, "not_complete", "Chat opens once the review is complete.");
+  const client = llmClient(env);
+  if (!client) throw new ApiError(503, "ai_off", "AI is turned off, so chat isn't available.");
+  const now = new Date();
+  if (!(await db.reserveChatQuestion(env.DB, user.id, utcDay(now), CHAT_QUESTIONS_PER_USER_PER_DAY))) {
+    throw new ApiError(429, "chat_quota", `You've asked ${CHAT_QUESTIONS_PER_USER_PER_DAY} chat questions today. The limit resets at midnight UTC.`, {
+      "retry-after": String(secondsUntilReset(now)),
+    });
+  }
+  // Chat may only use the budget down to CHAT_HEADROOM calls, so reviews and challenges keep some.
+  await reserveOr429(env, "app", 1, CHAT_HEADROOM);
+
+  const involved = new Set(r.findings.map((f) => f.standardId));
+  const exceptions = (await db.listExceptions(env.DB, "active", now)).filter((e) => involved.has(e.standardId));
+  const messages = buildChatMessages({
+    review: { verdict: r.verdict, inputKind: r.inputKind, author: r.author.name },
+    findings: r.findings.map((f) => ({ ...f, waived: !!f.waivedBy })),
+    standards: r.standards.filter((s) => involved.has(s.id) && s.title && s.rule).map((s) => ({ id: s.id, title: s.title!, rule: s.rule! })),
+    exceptions,
+    history: r.history.map((h) => ({ ...h, recentReasons: h.recentReasons.map((x) => x.reason) })),
+    messages: r.messages.map((m) => ({ role: m.role, content: m.content })),
+    question: redactSecrets(question),
+  });
+  let reply: string;
+  try {
+    const raw = parseJsonResponse(await client.json(messages, CHAT_SCHEMA, { maxTokens: 600 })) as { reply?: unknown } | null;
+    if (!raw || typeof raw.reply !== "string" || !raw.reply.trim()) throw new Error("malformed reply");
+    reply = redactSecrets(raw.reply.trim()).slice(0, 4_000);
+  } catch (e) {
+    console.error(JSON.stringify({ event: "chat_ai_failed", review: r.id, error: String(e) }));
+    throw new ApiError(502, "ai_unavailable", "The AI couldn't answer. Nothing was saved; try again.");
+  }
+  await db.appendChat(env.DB, { reviewId: r.id, userId: user.id, question: redactSecrets(question), reply, at: now.toISOString() });
+  return json({ reply, messages: await db.listChat(env.DB, r.id) } satisfies ChatResult);
+});
+
+// --- Dashboard ------------------------------------------------------------------------------
+
+route("GET", "/api/dashboard", async ({ req, env }) => {
+  await requireUser(req, env);
+  const now = new Date();
+  const used = await usage(env.DB, now);
+  return json({
+    ...(await db.dashboard(env.DB, now)),
+    budget: { day: utcDay(now), app: { used: used.app, limit: budgetLimit(env, "app") }, eval: { used: used.eval, limit: budgetLimit(env, "eval") } },
+  } satisfies DashboardView);
+});
+
+function assertAllowed(d: Decision): void {
+  if (!d.ok) throw new ApiError(d.code === "conflict" ? 409 : 403, d.code, d.message);
+}
+
 // --- Meta and eval --------------------------------------------------------------------------
 
 route("GET", "/api/meta", async ({ env }) => {
@@ -255,9 +439,9 @@ route("POST", "/api/eval/detect", async ({ req, env }) => {
   return json({ ...r, chunks, model: client.model, promptVersion: PROMPT_VERSION, ms: Date.now() - t0 });
 });
 
-async function reserveOr429(env: Env, bucket: Bucket, calls: number): Promise<void> {
+async function reserveOr429(env: Env, bucket: Bucket, calls: number, headroom = 0): Promise<void> {
   const now = new Date();
-  if (await reserve(env.DB, bucket, calls, budgetLimit(env, bucket), now)) return;
+  if (await reserve(env.DB, bucket, calls, Math.max(0, budgetLimit(env, bucket) - headroom), now)) return;
   console.log(JSON.stringify({ event: "budget_exhausted", bucket, calls }));
   throw new ApiError(429, "budget_exhausted", "Today's AI budget for this demo is used up. It resets at midnight UTC.", {
     "retry-after": String(secondsUntilReset(now)),

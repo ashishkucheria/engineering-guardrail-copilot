@@ -1,12 +1,12 @@
 // The daily AI budget (design §10): a strict counter in D1. Every request that will call the model
 // reserves its calls first, and a reservation that would go over the cap writes nothing. Reserved
 // calls are never refunded; over-counting errs on the safe side.
-import { parseLimit, utcDay, type Bucket } from "../core/budget.ts";
+import { appLimit, parseLimit, utcDay, type Bucket } from "../core/budget.ts";
 
 export { secondsUntilReset, utcDay, type Bucket } from "../core/budget.ts";
 
-export function budgetLimit(env: Pick<Env, "DAILY_LLM_CALLS_APP" | "DAILY_LLM_CALLS_EVAL">, bucket: Bucket): number {
-  return parseLimit(bucket === "app" ? env.DAILY_LLM_CALLS_APP : env.DAILY_LLM_CALLS_EVAL);
+export function budgetLimit(env: Pick<Env, "DAILY_LLM_CALLS_APP" | "DAILY_LLM_CALLS_EVAL" | "LLM_MODE">, bucket: Bucket): number {
+  return bucket === "app" ? appLimit(env.DAILY_LLM_CALLS_APP, String(env.LLM_MODE)) : parseLimit(env.DAILY_LLM_CALLS_EVAL);
 }
 
 /**

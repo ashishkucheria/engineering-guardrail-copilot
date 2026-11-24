@@ -32,7 +32,7 @@ jobs:
         run: npm run build
       - name: API smoke test against a local server (fake model, no Cloudflare account, no AI calls)
         run: |
-          echo 'LLM_MODE=fake' > .dev.vars
+          printf 'LLM_MODE=fake\nDAILY_LLM_CALLS_APP=60\n' > .dev.vars
           npm run db:setup:local
           npx vite dev --port 5173 --strictPort > dev.log 2>&1 &
           for i in $(seq 1 60); do curl -sf http://localhost:5173/api/users > /dev/null && break; sleep 1; done

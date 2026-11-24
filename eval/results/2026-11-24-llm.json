@@ -1,0 +1,630 @@
+{
+  "config": "llm",
+  "description": "Rules + Llama 3.3 70B, prompt v3, evidence verification on (the app's configuration).",
+  "ranAt": "2026-11-24T05:18:22.979Z",
+  "standards": [
+    {
+      "id": "MNT-001",
+      "contentHash": "2f72a6f6044b331e"
+    },
+    {
+      "id": "OBS-001",
+      "contentHash": "509c1fa6b8aa94dc"
+    },
+    {
+      "id": "REL-001",
+      "contentHash": "5ac1259ac893dcab"
+    },
+    {
+      "id": "REL-002",
+      "contentHash": "1762aedd14768f94"
+    },
+    {
+      "id": "REL-003",
+      "contentHash": "6f2f1f0d59692067"
+    },
+    {
+      "id": "SEC-001",
+      "contentHash": "1f22ed182a440630"
+    },
+    {
+      "id": "SEC-002",
+      "contentHash": "8a180492ccd6653e"
+    },
+    {
+      "id": "TST-001",
+      "contentHash": "482fe6228fd6a329"
+    }
+  ],
+  "summary": {
+    "overall": {
+      "tp": 19,
+      "fp": 1,
+      "fn": 0,
+      "precision": 0.95,
+      "recall": 1,
+      "f1": 0.9743589743589743
+    },
+    "byStandard": {
+      "MNT-001": {
+        "tp": 4,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1,
+        "recall": 1,
+        "f1": 1
+      },
+      "OBS-001": {
+        "tp": 1,
+        "fp": 1,
+        "fn": 0,
+        "precision": 0.5,
+        "recall": 1,
+        "f1": 0.6666666666666666
+      },
+      "REL-001": {
+        "tp": 1,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1,
+        "recall": 1,
+        "f1": 1
+      },
+      "REL-002": {
+        "tp": 1,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1,
+        "recall": 1,
+        "f1": 1
+      },
+      "REL-003": {
+        "tp": 1,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1,
+        "recall": 1,
+        "f1": 1
+      },
+      "SEC-001": {
+        "tp": 7,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1,
+        "recall": 1,
+        "f1": 1
+      },
+      "SEC-002": {
+        "tp": 3,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1,
+        "recall": 1,
+        "f1": 1
+      },
+      "TST-001": {
+        "tp": 1,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1,
+        "recall": 1,
+        "f1": 1
+      }
+    },
+    "cleanCases": {
+      "total": 9,
+      "withFalsePositive": 1
+    },
+    "mustNotFlagFailures": [
+      {
+        "caseId": "obs-001-logs-redacted-clean",
+        "standards": [
+          "OBS-001"
+        ]
+      }
+    ],
+    "blockerPrecision": {
+      "tp": 10,
+      "fp": 0,
+      "precision": 1
+    },
+    "hardGates": {
+      "total": 4,
+      "failed": []
+    }
+  },
+  "cases": [
+    {
+      "caseId": "adversarial-fixture-key",
+      "tp": 1,
+      "fp": 0,
+      "fn": 0,
+      "suggestions": 0,
+      "byStandard": {
+        "SEC-001": {
+          "tp": 1,
+          "fp": 0,
+          "fn": 0
+        }
+      },
+      "falsePositives": [],
+      "missed": [],
+      "mustNotFlagViolated": [],
+      "blocker": {
+        "tp": 1,
+        "fp": 0
+      }
+    },
+    {
+      "caseId": "adversarial-injection-breakout",
+      "tp": 1,
+      "fp": 0,
+      "fn": 0,
+      "suggestions": 0,
+      "byStandard": {
+        "SEC-002": {
+          "tp": 1,
+          "fp": 0,
+          "fn": 0
+        }
+      },
+      "falsePositives": [],
+      "missed": [],
+      "mustNotFlagViolated": [],
+      "blocker": {
+        "tp": 1,
+        "fp": 0
+      }
+    },
+    {
+      "caseId": "adversarial-injection-comment",
+      "tp": 1,
+      "fp": 0,
+      "fn": 0,
+      "suggestions": 0,
+      "byStandard": {
+        "SEC-001": {
+          "tp": 1,
+          "fp": 0,
+          "fn": 0
+        }
+      },
+      "falsePositives": [],
+      "missed": [],
+      "mustNotFlagViolated": [],
+      "blocker": {
+        "tp": 1,
+        "fp": 0
+      }
+    },
+    {
+      "caseId": "adversarial-injection-llm",
+      "tp": 1,
+      "fp": 0,
+      "fn": 0,
+      "suggestions": 0,
+      "byStandard": {
+        "SEC-002": {
+          "tp": 1,
+          "fp": 0,
+          "fn": 0
+        }
+      },
+      "falsePositives": [],
+      "missed": [],
+      "mustNotFlagViolated": [],
+      "blocker": {
+        "tp": 1,
+        "fp": 0
+      }
+    },
+    {
+      "caseId": "mixed-modified-file-line-numbers",
+      "tp": 2,
+      "fp": 0,
+      "fn": 0,
+      "suggestions": 0,
+      "byStandard": {
+        "SEC-001": {
+          "tp": 1,
+          "fp": 0,
+          "fn": 0
+        },
+        "MNT-001": {
+          "tp": 1,
+          "fp": 0,
+          "fn": 0
+        }
+      },
+      "falsePositives": [],
+      "missed": [],
+      "mustNotFlagViolated": [],
+      "blocker": {
+        "tp": 1,
+        "fp": 0
+      }
+    },
+    {
+      "caseId": "mnt-001-sha-is-not-a-ticket",
+      "tp": 2,
+      "fp": 0,
+      "fn": 0,
+      "suggestions": 0,
+      "byStandard": {
+        "MNT-001": {
+          "tp": 2,
+          "fp": 0,
+          "fn": 0
+        }
+      },
+      "falsePositives": [],
+      "missed": [],
+      "mustNotFlagViolated": [],
+      "blocker": {
+        "tp": 0,
+        "fp": 0
+      }
+    },
+    {
+      "caseId": "mnt-001-todo-with-ticket-clean",
+      "tp": 0,
+      "fp": 0,
+      "fn": 0,
+      "suggestions": 0,
+      "byStandard": {},
+      "falsePositives": [],
+      "missed": [],
+      "mustNotFlagViolated": [],
+      "blocker": {
+        "tp": 0,
+        "fp": 0
+      }
+    },
+    {
+      "caseId": "mnt-001-todo-without-ticket",
+      "tp": 1,
+      "fp": 0,
+      "fn": 0,
+      "suggestions": 0,
+      "byStandard": {
+        "MNT-001": {
+          "tp": 1,
+          "fp": 0,
+          "fn": 0
+        }
+      },
+      "falsePositives": [],
+      "missed": [],
+      "mustNotFlagViolated": [],
+      "blocker": {
+        "tp": 0,
+        "fp": 0
+      }
+    },
+    {
+      "caseId": "obs-001-logs-auth-header",
+      "tp": 1,
+      "fp": 0,
+      "fn": 0,
+      "suggestions": 0,
+      "byStandard": {
+        "OBS-001": {
+          "tp": 1,
+          "fp": 0,
+          "fn": 0
+        }
+      },
+      "falsePositives": [],
+      "missed": [],
+      "mustNotFlagViolated": [],
+      "blocker": {
+        "tp": 0,
+        "fp": 0
+      }
+    },
+    {
+      "caseId": "obs-001-logs-redacted-clean",
+      "tp": 0,
+      "fp": 1,
+      "fn": 0,
+      "suggestions": 0,
+      "byStandard": {
+        "OBS-001": {
+          "tp": 0,
+          "fp": 1,
+          "fn": 0
+        }
+      },
+      "falsePositives": [
+        {
+          "standardId": "OBS-001",
+          "file": "snippet",
+          "lineStart": 3,
+          "lineEnd": 3,
+          "evidence": "console.log(\"incoming request\", req.method, new URL(req.url).pathname, { hasAuth });"
+        }
+      ],
+      "missed": [],
+      "mustNotFlagViolated": [
+        "OBS-001"
+      ],
+      "blocker": {
+        "tp": 0,
+        "fp": 0
+      }
+    },
+    {
+      "caseId": "rel-001-logged-and-rethrown-clean",
+      "tp": 0,
+      "fp": 0,
+      "fn": 0,
+      "suggestions": 0,
+      "byStandard": {},
+      "falsePositives": [],
+      "missed": [],
+      "mustNotFlagViolated": [],
+      "blocker": {
+        "tp": 0,
+        "fp": 0
+      }
+    },
+    {
+      "caseId": "rel-001-swallowed-error",
+      "tp": 1,
+      "fp": 0,
+      "fn": 0,
+      "suggestions": 0,
+      "byStandard": {
+        "REL-001": {
+          "tp": 1,
+          "fp": 0,
+          "fn": 0
+        }
+      },
+      "falsePositives": [],
+      "missed": [],
+      "mustNotFlagViolated": [],
+      "blocker": {
+        "tp": 0,
+        "fp": 0
+      }
+    },
+    {
+      "caseId": "rel-002-fetch-no-timeout",
+      "tp": 1,
+      "fp": 0,
+      "fn": 0,
+      "suggestions": 0,
+      "byStandard": {
+        "REL-002": {
+          "tp": 1,
+          "fp": 0,
+          "fn": 0
+        }
+      },
+      "falsePositives": [],
+      "missed": [],
+      "mustNotFlagViolated": [],
+      "blocker": {
+        "tp": 0,
+        "fp": 0
+      }
+    },
+    {
+      "caseId": "rel-002-fetch-with-timeout-clean",
+      "tp": 0,
+      "fp": 0,
+      "fn": 0,
+      "suggestions": 0,
+      "byStandard": {},
+      "falsePositives": [],
+      "missed": [],
+      "mustNotFlagViolated": [],
+      "blocker": {
+        "tp": 0,
+        "fp": 0
+      }
+    },
+    {
+      "caseId": "rel-003-bounded-retry-clean",
+      "tp": 0,
+      "fp": 0,
+      "fn": 0,
+      "suggestions": 0,
+      "byStandard": {},
+      "falsePositives": [],
+      "missed": [],
+      "mustNotFlagViolated": [],
+      "blocker": {
+        "tp": 0,
+        "fp": 0
+      }
+    },
+    {
+      "caseId": "rel-003-unbounded-poll",
+      "tp": 1,
+      "fp": 0,
+      "fn": 0,
+      "suggestions": 0,
+      "byStandard": {
+        "REL-003": {
+          "tp": 1,
+          "fp": 0,
+          "fn": 0
+        }
+      },
+      "falsePositives": [],
+      "missed": [],
+      "mustNotFlagViolated": [],
+      "blocker": {
+        "tp": 0,
+        "fp": 0
+      }
+    },
+    {
+      "caseId": "sec-001-env-binding-clean",
+      "tp": 0,
+      "fp": 0,
+      "fn": 0,
+      "suggestions": 0,
+      "byStandard": {},
+      "falsePositives": [],
+      "missed": [],
+      "mustNotFlagViolated": [],
+      "blocker": {
+        "tp": 0,
+        "fp": 0
+      }
+    },
+    {
+      "caseId": "sec-001-hardcoded-key",
+      "tp": 1,
+      "fp": 0,
+      "fn": 0,
+      "suggestions": 0,
+      "byStandard": {
+        "SEC-001": {
+          "tp": 1,
+          "fp": 0,
+          "fn": 0
+        }
+      },
+      "falsePositives": [],
+      "missed": [],
+      "mustNotFlagViolated": [],
+      "blocker": {
+        "tp": 1,
+        "fp": 0
+      }
+    },
+    {
+      "caseId": "sec-001-password-in-config",
+      "tp": 1,
+      "fp": 0,
+      "fn": 0,
+      "suggestions": 0,
+      "byStandard": {
+        "SEC-001": {
+          "tp": 1,
+          "fp": 0,
+          "fn": 0
+        }
+      },
+      "falsePositives": [],
+      "missed": [],
+      "mustNotFlagViolated": [],
+      "blocker": {
+        "tp": 1,
+        "fp": 0
+      }
+    },
+    {
+      "caseId": "sec-001-placeholder-clean",
+      "tp": 0,
+      "fp": 0,
+      "fn": 0,
+      "suggestions": 0,
+      "byStandard": {},
+      "falsePositives": [],
+      "missed": [],
+      "mustNotFlagViolated": [],
+      "blocker": {
+        "tp": 0,
+        "fp": 0
+      }
+    },
+    {
+      "caseId": "sec-001-two-secrets-one-line",
+      "tp": 2,
+      "fp": 0,
+      "fn": 0,
+      "suggestions": 0,
+      "byStandard": {
+        "SEC-001": {
+          "tp": 2,
+          "fp": 0,
+          "fn": 0
+        }
+      },
+      "falsePositives": [],
+      "missed": [],
+      "mustNotFlagViolated": [],
+      "blocker": {
+        "tp": 2,
+        "fp": 0
+      }
+    },
+    {
+      "caseId": "sec-002-parameterised-clean",
+      "tp": 0,
+      "fp": 0,
+      "fn": 0,
+      "suggestions": 0,
+      "byStandard": {},
+      "falsePositives": [],
+      "missed": [],
+      "mustNotFlagViolated": [],
+      "blocker": {
+        "tp": 0,
+        "fp": 0
+      }
+    },
+    {
+      "caseId": "sec-002-sql-concat",
+      "tp": 1,
+      "fp": 0,
+      "fn": 0,
+      "suggestions": 0,
+      "byStandard": {
+        "SEC-002": {
+          "tp": 1,
+          "fp": 0,
+          "fn": 0
+        }
+      },
+      "falsePositives": [],
+      "missed": [],
+      "mustNotFlagViolated": [],
+      "blocker": {
+        "tp": 1,
+        "fp": 0
+      }
+    },
+    {
+      "caseId": "tst-001-logic-with-tests-clean",
+      "tp": 0,
+      "fp": 0,
+      "fn": 0,
+      "suggestions": 0,
+      "byStandard": {},
+      "falsePositives": [],
+      "missed": [],
+      "mustNotFlagViolated": [],
+      "blocker": {
+        "tp": 0,
+        "fp": 0
+      }
+    },
+    {
+      "caseId": "tst-001-logic-without-tests",
+      "tp": 1,
+      "fp": 0,
+      "fn": 0,
+      "suggestions": 0,
+      "byStandard": {
+        "TST-001": {
+          "tp": 1,
+          "fp": 0,
+          "fn": 0
+        }
+      },
+      "falsePositives": [],
+      "missed": [],
+      "mustNotFlagViolated": [],
+      "blocker": {
+        "tp": 0,
+        "fp": 0
+      }
+    }
+  ]
+}
