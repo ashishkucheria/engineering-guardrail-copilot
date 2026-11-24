@@ -38165,7 +38165,7 @@ var require_public_api = __commonJS({
       }
       return doc;
     }
-    function parse2(src, reviver, options) {
+    function parse3(src, reviver, options) {
       let _reviver = void 0;
       if (typeof reviver === "function") {
         _reviver = reviver;
@@ -38206,7 +38206,7 @@ var require_public_api = __commonJS({
         return value.toString(options);
       return new Document.Document(value, _replacer, options).toString(options);
     }
-    exports2.parse = parse2;
+    exports2.parse = parse3;
     exports2.parseAllDocuments = parseAllDocuments;
     exports2.parseDocument = parseDocument;
     exports2.stringify = stringify2;
@@ -38548,6 +38548,16 @@ var GitHubClient = class {
       await this.json("PATCH", `/check-runs/${created.id}`, { output: { title: input.title, summary: input.summary, annotations: batch } });
     }
     return created.id;
+  }
+  listReviewComments(number) {
+    return this.paged(`/pulls/${number}/comments`);
+  }
+  /** One pull request review holding all the comments, on the commit that was reviewed. */
+  async createReview(number, commitId, comments) {
+    await this.json("POST", `/pulls/${number}/reviews`, { commit_id: commitId, event: "COMMENT", comments: comments.map((c) => ({ path: c.path, line: c.line, side: "RIGHT", body: c.body })) });
+  }
+  async updateReviewComment(id, body) {
+    await this.json("PATCH", `/pulls/comments/${id}`, { body });
   }
   listIssueComments(number) {
     return this.paged(`/issues/${number}/comments`);
@@ -39368,6 +39378,9 @@ init_define_BUILTIN_STANDARDS();
 
 // core/exceptions.ts
 init_define_BUILTIN_STANDARDS();
+var MAX_EXCEPTION_DAYS = 90;
+var MAX_JUSTIFICATION_CHARS = 2e3;
+var MIN_JUSTIFICATION_CHARS = 10;
 function tokenize2(pattern) {
   const out = [];
   for (let i = 0; i < pattern.length; i++) {
@@ -39449,7 +39462,7 @@ var ruleDetector = {
     return { findings: runRules(input, enabled) };
   }
 };
-async function review(raw, standards, detectors = [ruleDetector], limits) {
+async function review(raw, standards, detectors = [ruleDetector], limits, exceptions = []) {
   const input = parseInput(raw, limits);
   const enabled = standards.filter((s) => s.enabled);
   const skipped = [];
@@ -39459,7 +39472,7 @@ async function review(raw, standards, detectors = [ruleDetector], limits) {
     all.push(...r.findings);
     skipped.push(...r.skipped ?? []);
   }
-  return { input, ...finalize(input, all, skipped), engine: detectors.map((d) => d.name).join("+") };
+  return { input, ...finalize(input, all, skipped, exceptions), engine: detectors.map((d) => d.name).join("+") };
 }
 var MAX_FINDINGS = 200;
 function finalize(input, all, extraSkipped, exceptions = []) {
@@ -39496,8 +39509,71 @@ function dedupe(findings) {
   return kept;
 }
 
+// action/exceptions.ts
+init_define_BUILTIN_STANDARDS();
+var import_yaml = __toESM(require_dist2(), 1);
+var MAX_EXCEPTIONS = 200;
+var MAX_EXCEPTIONS_BYTES = 1e5;
+var DEFAULT_EXCEPTIONS_PATH = ".guardrail/exceptions.yaml";
+var DAY = 864e5;
+var PATTERN = /^[\w./*?@+-]{1,200}$/;
+var KNOWN = /* @__PURE__ */ new Set(["standard", "path", "reason", "approved-by", "expires"]);
+var NO_EXCEPTIONS = { active: [], ignored: [] };
+function parseExceptions(text, standards, now) {
+  if (new TextEncoder().encode(text).byteLength > MAX_EXCEPTIONS_BYTES) return { active: [], ignored: [`${DEFAULT_EXCEPTIONS_PATH} is over ${MAX_EXCEPTIONS_BYTES / 1e3} KB; no exception was applied`] };
+  let doc;
+  try {
+    doc = (0, import_yaml.parse)(text);
+  } catch (e) {
+    return { active: [], ignored: [`the exceptions file is not valid YAML (${e instanceof Error ? e.message.split("\n")[0] : String(e)}); no exception was applied`] };
+  }
+  if (doc === null || doc === void 0) return NO_EXCEPTIONS;
+  const list = doc?.exceptions;
+  if (!Array.isArray(list)) return { active: [], ignored: ['the exceptions file needs a top-level "exceptions:" list; no exception was applied'] };
+  const known = new Set(standards.map((s) => s.id));
+  const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const out = { active: [], ignored: [] };
+  list.slice(0, MAX_EXCEPTIONS).forEach((raw, i) => {
+    const id = `exception-${i + 1}`;
+    const bad = (why) => void out.ignored.push(`${id}: ${why}`);
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return bad("not a mapping");
+    const e = raw;
+    const unknown = Object.keys(e).filter((k) => !KNOWN.has(k));
+    if (unknown.length) return bad(`unknown field(s) ${unknown.join(", ")}`);
+    const str = (k) => typeof e[k] === "string" ? e[k].trim() : "";
+    const standardId = str("standard");
+    if (!known.has(standardId)) return bad(`"${standardId || "standard"}" is not one of this repository's standards`);
+    const path4 = str("path");
+    if (!PATTERN.test(path4) && path4 !== "*") return bad('"path" must be a path glob (letters, digits, . / _ - and * ? wildcards), or "*"');
+    const reason = str("reason");
+    if (reason.length < MIN_JUSTIFICATION_CHARS || reason.length > MAX_JUSTIFICATION_CHARS) return bad(`"reason" must be ${MIN_JUSTIFICATION_CHARS} to ${MAX_JUSTIFICATION_CHARS} characters`);
+    const approvedBy = str("approved-by");
+    if (!approvedBy) return bad('"approved-by" is required');
+    const expires = str("expires");
+    const day = /^(\d{4})-(\d{2})-(\d{2})$/.exec(expires);
+    const end = day ? Date.UTC(+day[1], +day[2] - 1, +day[3]) : NaN;
+    if (!day || Number.isNaN(end) || new Date(end).toISOString().slice(0, 10) !== expires) return bad('"expires" must be a date like 2027-01-31');
+    if (end + DAY <= now.getTime()) return bad(`expired on ${expires}`);
+    if (end > today + MAX_EXCEPTION_DAYS * DAY) return bad(`"expires" is more than ${MAX_EXCEPTION_DAYS} days away`);
+    out.active.push({ id, standardId, pathPattern: path4, reason, approvedBy, expires });
+  });
+  if (list.length > MAX_EXCEPTIONS) out.ignored.push(`only the first ${MAX_EXCEPTIONS} exceptions were read`);
+  return out;
+}
+async function loadExceptions(gh, path4, baseSha, standards, now) {
+  let text;
+  try {
+    text = await gh.getFileText(path4, baseSha);
+  } catch (e) {
+    if (e?.status === 404) return NO_EXCEPTIONS;
+    throw e;
+  }
+  return parseExceptions(text, standards, now);
+}
+
 // action/publish.ts
 init_define_BUILTIN_STANDARDS();
+var import_node_crypto2 = require("node:crypto");
 var SUMMARY_MARKER = "<!-- guardrail:summary -->";
 var CHECK_NAME = "Guardrail";
 var MAX_MARKDOWN = 6e4;
@@ -39553,7 +39629,7 @@ function renderSummary(r, opts = {}) {
   if (opts.marker ?? true) out.push(SUMMARY_MARKER);
   out.push(`## Guardrail: ${r.verdict}`, "");
   out.push(
-    `${plural(c.violations, "violation")}${c.blockers ? ` (${c.blockers} blocker${c.blockers === 1 ? "" : "s"})` : ""}, ${plural(c.suggestions, "suggestion")}. ${r.coverage.filesReviewed} of ${plural(r.coverage.filesTotal, "file")} reviewed. Check conclusion: **${r.conclusion}**.`,
+    `${plural(c.violations, "violation")}${c.blockers ? ` (${c.blockers} blocker${c.blockers === 1 ? "" : "s"})` : ""}, ${plural(c.suggestions, "suggestion")}. ${r.waived?.length ? `${r.waived.length} waived by exceptions. ` : ""}${r.coverage.filesReviewed} of ${plural(r.coverage.filesTotal, "file")} reviewed. Check conclusion: **${r.conclusion}**.`,
     ""
   );
   const how = [r.provider === "none" ? "Rules only (`provider: none`)" : `Rules and AI (\`${clean(r.provider)}\`${r.model ? `, \`${clean(r.model)}\`` : ""})`];
@@ -39578,6 +39654,19 @@ function renderSummary(r, opts = {}) {
     if (suggestions.length > MAX_SUGGESTIONS) out.push(`- \u2026and ${suggestions.length - MAX_SUGGESTIONS} more`);
     out.push("", "</details>", "");
   }
+  if (r.waived?.length) {
+    out.push(`<details><summary>Waived by exceptions (${r.waived.length})</summary>`, "");
+    for (const w of r.waived.slice(0, MAX_SUGGESTIONS)) {
+      out.push(`- ${w.finding.standardId} in \`${clean(place(w.finding), 120)}\`: waived by \`${w.exceptionId}\` (approved by ${clean(w.approvedBy, 60)}, until ${w.expires}): ${clean(w.reason, 300)}`);
+    }
+    if (r.waived.length > MAX_SUGGESTIONS) out.push(`- \u2026and ${r.waived.length - MAX_SUGGESTIONS} more`);
+    out.push("", "</details>", "");
+  }
+  if (r.exceptionNotes?.length) {
+    out.push("### Exceptions not applied", "");
+    for (const n of r.exceptionNotes.slice(0, MAX_GAPS)) out.push(`- ${clean(n, 300)}`);
+    out.push("");
+  }
   if (r.coverage.skipped.length) {
     out.push("### Not fully reviewed", "");
     for (const g of r.coverage.skipped.slice(0, MAX_GAPS)) out.push(`- \`${clean(g.file, 120)}\`: ${clean(g.reason, 200)}`);
@@ -39590,13 +39679,49 @@ function renderSummary(r, opts = {}) {
 
 \u2026(shortened)` : md;
 }
+var FINGERPRINT_PREFIX = "<!-- guardrail:fp:";
+var STALE_MARKER = "<!-- guardrail:stale -->";
+var MAX_INLINE_PER_RUN = 25;
+function fingerprint(f) {
+  const evidence = f.evidence.replace(/\s+/g, " ").trim();
+  return (0, import_node_crypto2.createHash)("sha256").update([f.standardId, f.file, evidence].join("\n")).digest("hex").slice(0, 16);
+}
+function inlineBody(f) {
+  const parts = [`**${f.standardId}** (${f.severity}): ${clean(f.explanation, 600)}`, f.remediation ? `Fix: ${clean(f.remediation, 400)}` : "", `${FINGERPRINT_PREFIX}${fingerprint(f)} -->`];
+  return parts.filter(Boolean).join("\n\n");
+}
+var STALE_NOTE = /^_No longer detected in `[0-9a-f]+`\._\n\n/;
+function staleBody(body, sha) {
+  const original = body.replace(STALE_MARKER, "").replace(STALE_NOTE, "");
+  return `${STALE_MARKER}_No longer detected in \`${sha.slice(0, 7)}\`._
+
+${original}`;
+}
+var fingerprintOf = (body) => new RegExp(`${FINGERPRINT_PREFIX}([0-9a-f]{16}) -->`).exec(body ?? "")?.[1] ?? null;
+function planInline(findings, commentable) {
+  const current = /* @__PURE__ */ new Set();
+  const seen = /* @__PURE__ */ new Set();
+  const candidates = [];
+  for (const f of findings) {
+    if (f.classification !== "violation" || f.waivedBy) continue;
+    const fp = fingerprint(f);
+    current.add(fp);
+    if (seen.has(fp)) continue;
+    const lines = commentable.get(f.file);
+    const line = lines && [...Array(f.lineEnd - f.lineStart + 1).keys()].map((i) => f.lineStart + i).find((n) => lines.has(n));
+    if (line === void 0) continue;
+    seen.add(fp);
+    candidates.push({ fingerprint: fp, comment: { path: f.file, line, body: inlineBody(f) } });
+  }
+  return { current, candidates };
+}
 
 // action/standards.ts
 init_define_BUILTIN_STANDARDS();
 
 // core/standards-yaml.ts
 init_define_BUILTIN_STANDARDS();
-var import_yaml = __toESM(require_dist2(), 1);
+var import_yaml2 = __toESM(require_dist2(), 1);
 async function parseStandardFiles(files) {
   const yamlFiles = files.filter((f) => f.name.endsWith(".yaml")).sort((a, b) => a.name.localeCompare(b.name));
   if (yamlFiles.length === 0) throw new Error("no standards found (.yaml files)");
@@ -39605,7 +39730,7 @@ async function parseStandardFiles(files) {
   for (const f of yamlFiles) {
     let raw;
     try {
-      raw = (0, import_yaml.parse)(f.text);
+      raw = (0, import_yaml2.parse)(f.text);
     } catch (e) {
       throw new Error(`${f.name}: invalid YAML (${e instanceof Error ? e.message.split("\n")[0] : String(e)})`);
     }
@@ -39662,6 +39787,9 @@ async function reviewPullRequest(pr, inputs, deps) {
   const folder = inputs.standardsPath.replace(/\/+$/, "") + "/";
   const standardsChanged = files.some((f) => f.filename.startsWith(folder) || f.previous_filename?.startsWith(folder));
   const enabled = loaded.standards.filter((s) => s.enabled);
+  const exceptions = await loadExceptions(gh, DEFAULT_EXCEPTIONS_PATH, pr.baseSha, loaded.standards, (deps.now ?? (() => /* @__PURE__ */ new Date()))());
+  const exceptionNotes = [...exceptions.ignored];
+  if (files.some((f) => f.filename === DEFAULT_EXCEPTIONS_PATH)) exceptionNotes.push("this pull request changes the exceptions file; it was reviewed against the exceptions at the base commit, so the change takes effect after it merges");
   const unavailable = aiUnavailable(inputs, pr);
   const wantAi = inputs.provider !== "none" && unavailable === null && enabled.some(usesLlm);
   const counter = countingFetch(deps.fetch ?? fetch, inputs.maxAiCalls);
@@ -39688,13 +39816,15 @@ async function reviewPullRequest(pr, inputs, deps) {
     );
   }
   let findings, coverage, verdict;
+  let parsed;
   if (diff === "") {
     coverage = { filesTotal: 0, filesReviewed: 0, skipped: extraGaps };
     findings = [];
     verdict = computeVerdict(findings, coverage);
   } else {
-    const r = await review(diff, loaded.standards, detectors, { maxFiles: inputs.maxFiles, maxFileBytes: MAX_INPUT_BYTES });
+    const r = await review(diff, loaded.standards, detectors, { maxFiles: inputs.maxFiles, maxFileBytes: MAX_INPUT_BYTES }, exceptions.active);
     ({ findings, coverage, verdict } = r);
+    parsed = r.input;
   }
   const counts = countFindings(findings);
   const conclusion = gate(verdict, counts, inputs.failOn, inputs.failOnIncomplete);
@@ -39709,7 +39839,9 @@ async function reviewPullRequest(pr, inputs, deps) {
     standardsChanged,
     notChecked: client ? [] : enabled.filter((s) => usesLlm(s) && !usesRule(s)).map((s) => `${s.id} ${s.title}`),
     headSha: pr.headSha,
-    conclusion
+    conclusion,
+    waived: waivedFindings(findings, exceptions),
+    exceptionNotes
   };
   const markdown = renderSummary(report);
   deps.summary(renderSummary(report, { marker: false }));
@@ -39732,6 +39864,10 @@ async function reviewPullRequest(pr, inputs, deps) {
       );
     }
     if (inputs.summaryComment) await attempt(deps, "summary comment", () => upsertSummaryComment(gh, pr.number, markdown));
+    if (inputs.inlineComments && parsed) {
+      const input = parsed;
+      await attempt(deps, "inline comments", async () => deps.info(await syncInlineComments(gh, pr, findings, input)));
+    }
   }
   return { verdict, counts, conclusion, incomplete: verdict === "incomplete", summary: markdown };
 }
@@ -39748,6 +39884,42 @@ async function upsertSummaryComment(gh, number, body) {
   if (mine) await gh.updateComment(mine.id, body);
   else await gh.createComment(number, body);
 }
+function waivedFindings(findings, exceptions) {
+  const byId = new Map(exceptions.active.map((e) => [e.id, e]));
+  return findings.flatMap((f) => {
+    const e = f.waivedBy ? byId.get(f.waivedBy) : void 0;
+    return e ? [{ finding: f, exceptionId: e.id, reason: e.reason, approvedBy: e.approvedBy, expires: e.expires }] : [];
+  });
+}
+async function syncInlineComments(gh, pr, findings, input) {
+  const commentable = new Map(input.files.map((f) => [f.path, new Set(f.lines.map((l) => l.n))]));
+  const plan = planInline(findings, commentable);
+  const mine = /* @__PURE__ */ new Map();
+  for (const c of await gh.listReviewComments(pr.number)) {
+    const fp = c.user?.type === "Bot" ? fingerprintOf(c.body) : null;
+    if (fp && c.body !== void 0) mine.set(fp, { id: c.id, body: c.body });
+  }
+  let restored = 0;
+  let staled = 0;
+  for (const { fingerprint: fp, comment } of plan.candidates) {
+    const old = mine.get(fp);
+    if (old?.body.includes(STALE_MARKER)) {
+      await gh.updateReviewComment(old.id, comment.body);
+      restored++;
+    }
+  }
+  for (const [fp, old] of mine) {
+    if (!plan.current.has(fp) && !old.body.includes(STALE_MARKER)) {
+      await gh.updateReviewComment(old.id, staleBody(old.body, pr.headSha));
+      staled++;
+    }
+  }
+  const fresh = plan.candidates.filter((c) => !mine.has(c.fingerprint));
+  const posting = fresh.slice(0, MAX_INLINE_PER_RUN);
+  if (posting.length) await gh.createReview(pr.number, pr.headSha, posting.map((c) => c.comment));
+  const left = fresh.length - posting.length;
+  return `Inline comments: ${posting.length} new${left ? ` (${left} more not posted: ${MAX_INLINE_PER_RUN} per run, see the summary)` : ""}, ${staled} marked no longer detected, ${restored} restored.`;
+}
 
 // action/main.ts
 function readInputs(env = process.env) {
@@ -39762,6 +39934,7 @@ function readInputs(env = process.env) {
     failOnIncomplete: getBoolean("fail-on-incomplete", false, env),
     checkRun: getBoolean("check-run", true, env),
     summaryComment: getBoolean("summary-comment", true, env),
+    inlineComments: getBoolean("inline-comments", false, env),
     maxAiCalls: getPositiveInt("max-ai-calls", 20, env),
     maxFiles: getPositiveInt("max-files", 50, env)
   };

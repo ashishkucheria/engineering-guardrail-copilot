@@ -96,6 +96,117 @@ everything in D1. The model can explain and argue; code decides what counts as a
 - Standards live in `standards/*.yaml`. Approvers can enable or disable them, every change is audited, and every
   review keeps a snapshot of the version and status of every standard it ran with.
 
+## Review pull requests with the GitHub Action
+
+The Action checks each pull request against **your repository's own standards**, with the AI provider and key you
+choose. It uses the same engine as the web app (deterministic rules, then the model, then evidence verification,
+with code deciding the verdict) and needs no web app, Cloudflare account or database.
+
+```yaml
+# .github/workflows/guardrail.yml
+name: Guardrail
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+permissions:
+  contents: read
+  pull-requests: write   # summary and inline comments
+  checks: write          # check run and annotations
+concurrency:
+  group: guardrail-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ashishkucheria/engineering-guardrail-copilot@v1
+        with:
+          provider: anthropic
+          api-key: ${{ secrets.GUARDRAIL_AI_KEY }}
+          fail-on: blocker
+```
+
+No `actions/checkout` is needed: the Action reads the diff and the standards through the GitHub API, and it never
+checks out or runs the pull request's code. No release is tagged yet, so until `v1` exists use `@master` or a
+commit SHA.
+
+**Status.** Tested against a mocked GitHub and mocked providers, as a built bundle against a local fake GitHub, and
+on this repository's own pull requests with `provider: none`. The four provider adapters haven't been run against
+the real services; `npm run try:provider -- <provider>` does that with your key (see
+[`scripts/try-provider.ts`](scripts/try-provider.ts)).
+
+### What it writes
+
+- A **"Guardrail" check run** with an annotation on each finding's line (blocker, major and minor become failure,
+  warning and notice).
+- **One summary comment**, edited on every push, never a new one.
+- Optionally (`inline-comments: true`) a **comment on each new violation's line**, as one review. Comments carry a
+  hidden fingerprint (standard, file and quoted code, not the line), so a re-run doesn't repeat them; when a
+  finding is gone its comment is edited to say so. At most 25 new comments per run.
+- The job summary, and the outputs `verdict`, `violations`, `blockers` and `incomplete`.
+
+The check is **advisory** unless you set `fail-on`: `blocker` fails it on any blocker, `major` on any blocker or
+major. An `incomplete` review (a file or a chunk couldn't be read) is neutral unless `fail-on-incomplete: true`.
+Make the check required in branch protection if you want it to block merges.
+
+### Inputs
+
+| Input | Default | Meaning |
+|---|---|---|
+| `provider` | `none` | `openai-compatible`, `anthropic`, `gemini`, `workers-ai`, or `none` (rules only; nothing leaves the runner) |
+| `api-key` | | Provider key, from a secret |
+| `model` | per provider | `gpt-6-luna`, `claude-opus-5-5`, `gemini-3.5-flash-lite`, or a Llama 3.3 model on Workers AI |
+| `base-url` | OpenAI's | `openai-compatible` only (Groq, Together, OpenRouter, vLLM, Ollama, ...) |
+| `cloudflare-account-id` | | `workers-ai` only |
+| `standards-path` | `.guardrail/standards` | Folder of standard YAML files in your repository |
+| `fail-on` | `none` | `none`, `blocker` or `major` |
+| `fail-on-incomplete` | `false` | Fail the check when part of the pull request couldn't be reviewed |
+| `check-run` | `true` | Create the check run with annotations |
+| `summary-comment` | `true` | Keep one summary comment up to date |
+| `inline-comments` | `false` | Comment on each new violation's line |
+| `max-ai-calls` | `20` | Upper bound on provider requests per run, retries included |
+| `max-files` | `50` | Files reviewed per pull request; the rest are listed as not reviewed |
+| `github-token` | `github.token` | Token for reading the pull request and writing results |
+
+### Your standards
+
+Put one YAML file per standard in `.guardrail/standards/`, named after its id (`SEC-001.yaml`), in the format of
+[`standards/`](standards). If the folder doesn't exist, the eight built-in standards apply. They are read **from
+the pull request's base commit**, so a pull request can't switch off the standard it breaks; a pull request that
+edits them is reviewed against the old ones, and the summary says so. An invalid file fails the run, naming it.
+
+### Exceptions
+
+`.guardrail/exceptions.yaml`, also read from the base commit, so adding one takes a reviewed merge:
+
+```yaml
+exceptions:
+  - standard: SEC-002
+    path: scripts/**                # glob; * matches every path
+    reason: Build script; the input is a constant list.   # at least 10 characters
+    approved-by: octocat
+    expires: 2027-01-31             # at most 90 days from the day it is read
+```
+
+A waived finding doesn't count toward the verdict or the check, and stays in the summary with the reason and who
+approved it. An entry that is expired, too far out, misspelled or for an unknown standard is ignored, and the
+summary lists it.
+
+### Forks, privacy and limits
+
+- On a `pull_request` from a fork, GitHub gives the workflow no secrets and a read-only token. The Action then runs
+  the rules only, reports in the job summary, marks the review `incomplete` (the AI standards weren't checked) and
+  writes nothing to the pull request. The same fallback applies when `api-key` is empty for another reason, such
+  as a Dependabot run. Under `pull_request_target` the secrets exist, so a fork's pull request is reviewed in full.
+- **The changed code is sent to the AI provider you choose.** With `provider: none` nothing leaves the runner, and
+  the verdict isn't `incomplete` because of it; the summary lists the standards that needed AI.
+- Secrets quoted in findings are redacted, and the model's text is neutralised (HTML, links, `@` mentions) before
+  it goes into a comment.
+- Per file: 100 KB. Lock files, minified files, source maps and `dist/`, `build/`, `vendor/` are never sent to the
+  model. The whole pull request is reviewed on every push.
+
+Design and decisions: [`docs/pr-reviewer-design.md`](docs/pr-reviewer-design.md).
+
 ## Run it locally
 
 Needs Node 22.18+ (it runs TypeScript scripts directly) and npm.
@@ -205,6 +316,9 @@ each on 25 cases (2026-11-24).
 ## Layout
 
 ```
+action.yml   the GitHub Action (see "Review pull requests with the GitHub Action")
+action/      the Action: GitHub client, standards and exceptions from the repo, publishing, AI providers
+dist/action/ its bundle, built by `npm run build:action` and committed
 core/        pure domain logic: diff parsing, chunking, rules, prompts, LLM detector, engine, verdict, policy
 worker/      the API Worker: routing, demo identity, D1 queries, the review Workflow, AI clients, budget
 client/      React UI
@@ -251,9 +365,9 @@ docs/        build notes: the design and the prompt history
 
 ## Roadmap
 
-Review pull requests where they happen: a GitHub Action (or webhook) that sends a PR's diff to the review pipeline,
-reads the standards from the repository being reviewed, and posts the findings as PR comments. The web app stays the
-place for exceptions, challenges and the dashboard. Design: [`docs/pr-reviewer-design.md`](docs/pr-reviewer-design.md).
+Not built: reviewing only what changed since the last push (the Action reviews the whole pull request each time),
+and showing the Action's findings, challenges and exceptions in the web app's dashboard. The web app and the Action
+share the engine but not data.
 
 ## How it was built
 

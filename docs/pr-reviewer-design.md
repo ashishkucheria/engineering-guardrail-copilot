@@ -21,7 +21,7 @@ talk to the web app or D1.
 | D4 | Output on the PR | **Check run with annotations, one summary comment, inline review comments**, each switchable. Default: check + summary on, inline off *(decided)* |
 | D5 | Gating | **Advisory by default.** `fail-on: blocker` or `major` makes the check fail; branch protection can then require it *(decided)* |
 | D6 | Packaging | **In this repository:** `action.yml` at the root, a bundled JavaScript action built from the same `core/`. Used as `ashishkucheria/engineering-guardrail-copilot@v1` *(decided)* |
-| D7 | Exceptions | **`.guardrail/exceptions.yaml`, read from the base commit,** so adding an exception needs a reviewed merge. Each entry: standard, path glob, reason, expiry (at most 90 days), who approved. Expired entries are ignored and listed in the summary *(decided)* |
+| D7 | Exceptions | **`.guardrail/exceptions.yaml`, read from the base commit,** so adding an exception needs a reviewed merge. Each entry: `standard`, `path` glob, `reason` (10 to 2,000 characters), `approved-by`, `expires` (a date at most 90 days from the day it is read, valid through that day). An entry that is expired, too far out, misspelled or for an unknown standard is **ignored and listed in the summary**, never applied; a file that isn't valid YAML applies none. Unlike a broken standards file this doesn't fail the run: ignoring is the safe direction, and one bad entry shouldn't stop every review. Waived findings stay in the summary with the reason and approver *(decided)* |
 | D8 | Default models | **`gpt-6-luna`** (`openai-compatible`), **`claude-opus-5-5`** (`anthropic`), **`gemini-3.5-flash-lite`** (`gemini`), each overridable with `model`. `gpt-4o-mini` was chosen first, then dropped when building 4-A: it is deprecated and shuts down on 2027-01-14 *(decided)* |
 | D9 | Re-runs | **The whole PR on every push;** the concurrency group cancels superseded runs. No state kept between runs *(decided)* |
 
@@ -148,9 +148,15 @@ so temperature is sent only where it's accepted.
 
 **Inline comments**, off by default:
 - One review comment per violation on its changed line, posted as a single PR review.
-- Each carries a hidden fingerprint (standard, file, evidence hash) so a re-run skips ones already posted and
-  marks those no longer found as outdated, instead of duplicating them.
-- Only lines in the diff can be commented on; findings elsewhere stay in the summary.
+- Each carries a hidden fingerprint (standard, file, hash of the quoted code; not the line) so a re-run skips ones
+  already posted instead of duplicating them. GitHub has no REST call to mark a comment outdated, so a comment
+  whose finding is gone is edited to say "No longer detected in `sha`" (the fingerprint stays), and put back if
+  the finding returns. Only the Action's own comments (author type `Bot`) are ever edited.
+- Only lines in the diff can be commented on (GitHub rejects the whole review otherwise): the first line of a
+  finding's range that the diff shows. Findings elsewhere stay in the summary and the check. A finding off the
+  diff still counts as "found", so its old comment isn't marked gone.
+- At most 25 new comments per run, so a large PR can't flood its author; the rest stay in the summary.
+- Only violations get inline comments; suggestions and waived findings don't.
 
 Everything posted is redacted the same way as in the app: the comment is public to anyone who can see the PR.
 
@@ -198,6 +204,7 @@ action/run.ts               the flow (§4) and the writes; everything outside it
 action/runner.ts            the runner protocol by hand: INPUT_* variables, GITHUB_OUTPUT, ::add-mask::, job summary
 action/github.ts            PR files, contents at a ref, check runs, comments, over fetch (no Octokit)
 action/standards.ts         standards from the repository at the base commit, or the built-in set
+action/exceptions.ts       `.guardrail/exceptions.yaml` at the base commit: validation, expiry, what is ignored and why
 action/publish.ts           gating, annotations, summary Markdown, escaping (pure, unit-tested)
 action/providers/*.ts       openai-compatible, anthropic, gemini, workers-ai
 core/                       unchanged except: standards from YAML text, per-file limits, generated-file skipping

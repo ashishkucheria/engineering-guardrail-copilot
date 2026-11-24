@@ -5,7 +5,8 @@
 // Everything here is built from verified findings. The model's text (explanations, quoted code) is
 // untrusted: it is neutralised before it goes into Markdown, because a PR comment is public and
 // renders links, images and @mentions.
-import type { Annotation } from "./github.ts";
+import { createHash } from "node:crypto";
+import type { Annotation, InlineComment } from "./github.ts";
 import type { Coverage, Finding, Severity, Verdict } from "../core/types.ts";
 
 export const SUMMARY_MARKER = "<!-- guardrail:summary -->";
@@ -101,6 +102,15 @@ export function annotationsFor(findings: Finding[]): Annotation[] {
 
 // --- Summary ---------------------------------------------------------------------------------
 
+/** A finding an exception waived, with what the repository's exceptions file says about it. */
+export interface Waived {
+  finding: Finding;
+  exceptionId: string;
+  reason: string;
+  approvedBy: string;
+  expires: string;
+}
+
 export interface Report {
   verdict: Verdict;
   findings: Finding[];
@@ -116,6 +126,10 @@ export interface Report {
   notChecked: string[];
   headSha: string;
   conclusion: Conclusion;
+  /** Findings waived by exceptions; they don't count toward the verdict or the conclusion. */
+  waived?: Waived[];
+  /** Exceptions that weren't applied (invalid, expired, unknown standard), each with why. */
+  exceptionNotes?: string[];
 }
 
 export function renderSummary(r: Report, opts: { marker?: boolean } = {}): string {
@@ -127,6 +141,7 @@ export function renderSummary(r: Report, opts: { marker?: boolean } = {}): strin
   out.push(`## Guardrail: ${r.verdict}`, "");
   out.push(
     `${plural(c.violations, "violation")}${c.blockers ? ` (${c.blockers} blocker${c.blockers === 1 ? "" : "s"})` : ""}, ${plural(c.suggestions, "suggestion")}. ` +
+      `${r.waived?.length ? `${r.waived.length} waived by exceptions. ` : ""}` +
       `${r.coverage.filesReviewed} of ${plural(r.coverage.filesTotal, "file")} reviewed. Check conclusion: **${r.conclusion}**.`,
     "",
   );
@@ -154,6 +169,19 @@ export function renderSummary(r: Report, opts: { marker?: boolean } = {}): strin
     if (suggestions.length > MAX_SUGGESTIONS) out.push(`- …and ${suggestions.length - MAX_SUGGESTIONS} more`);
     out.push("", "</details>", "");
   }
+  if (r.waived?.length) {
+    out.push(`<details><summary>Waived by exceptions (${r.waived.length})</summary>`, "");
+    for (const w of r.waived.slice(0, MAX_SUGGESTIONS)) {
+      out.push(`- ${w.finding.standardId} in \`${clean(place(w.finding), 120)}\`: waived by \`${w.exceptionId}\` (approved by ${clean(w.approvedBy, 60)}, until ${w.expires}): ${clean(w.reason, 300)}`);
+    }
+    if (r.waived.length > MAX_SUGGESTIONS) out.push(`- …and ${r.waived.length - MAX_SUGGESTIONS} more`);
+    out.push("", "</details>", "");
+  }
+  if (r.exceptionNotes?.length) {
+    out.push("### Exceptions not applied", "");
+    for (const n of r.exceptionNotes.slice(0, MAX_GAPS)) out.push(`- ${clean(n, 300)}`);
+    out.push("");
+  }
   if (r.coverage.skipped.length) {
     out.push("### Not fully reviewed", "");
     for (const g of r.coverage.skipped.slice(0, MAX_GAPS)) out.push(`- \`${clean(g.file, 120)}\`: ${clean(g.reason, 200)}`);
@@ -164,4 +192,65 @@ export function renderSummary(r: Report, opts: { marker?: boolean } = {}): strin
 
   const md = out.join("\n").trimEnd();
   return md.length > MAX_MARKDOWN ? `${md.slice(0, MAX_MARKDOWN)}\n\n…(shortened)` : md;
+}
+
+// --- Inline comments -------------------------------------------------------------------------
+
+export const FINGERPRINT_PREFIX = "<!-- guardrail:fp:";
+export const STALE_MARKER = "<!-- guardrail:stale -->";
+/** New inline comments per run, so one big PR can't flood its author; the rest stay in the summary and the check. */
+export const MAX_INLINE_PER_RUN = 25;
+
+/**
+ * Identifies a finding across pushes: the standard, the file and the quoted code, not the line
+ * number, so a finding that only moved isn't posted again.
+ */
+export function fingerprint(f: Pick<Finding, "standardId" | "file" | "evidence">): string {
+  const evidence = f.evidence.replace(/\s+/g, " ").trim();
+  return createHash("sha256").update([f.standardId, f.file, evidence].join("\n")).digest("hex").slice(0, 16);
+}
+
+export function inlineBody(f: Finding): string {
+  const parts = [`**${f.standardId}** (${f.severity}): ${clean(f.explanation, 600)}`, f.remediation ? `Fix: ${clean(f.remediation, 400)}` : "", `${FINGERPRINT_PREFIX}${fingerprint(f)} -->`];
+  return parts.filter(Boolean).join("\n\n");
+}
+
+const STALE_NOTE = /^_No longer detected in `[0-9a-f]+`\._\n\n/;
+
+/** The comment with a note that the finding is gone; the fingerprint stays so it can be matched again. */
+export function staleBody(body: string, sha: string): string {
+  const original = body.replace(STALE_MARKER, "").replace(STALE_NOTE, "");
+  return `${STALE_MARKER}_No longer detected in \`${sha.slice(0, 7)}\`._\n\n${original}`;
+}
+
+export const fingerprintOf = (body: string | undefined): string | null => new RegExp(`${FINGERPRINT_PREFIX}([0-9a-f]{16}) -->`).exec(body ?? "")?.[1] ?? null;
+
+export interface InlinePlan {
+  /** Fingerprints of every unwaived violation found now, commentable or not. */
+  current: Set<string>;
+  /** Violations that sit on a line the diff shows, one per fingerprint, in order. */
+  candidates: { fingerprint: string; comment: InlineComment }[];
+}
+
+/**
+ * Violations that can take an inline comment: unwaived, and on a line that is part of the diff (GitHub
+ * rejects a review comment anywhere else, and rejects the whole review if one is wrong). Findings
+ * elsewhere stay in the summary and the check.
+ */
+export function planInline(findings: Finding[], commentable: Map<string, Set<number>>): InlinePlan {
+  const current = new Set<string>();
+  const seen = new Set<string>();
+  const candidates: InlinePlan["candidates"] = [];
+  for (const f of findings) {
+    if (f.classification !== "violation" || f.waivedBy) continue;
+    const fp = fingerprint(f);
+    current.add(fp);
+    if (seen.has(fp)) continue;
+    const lines = commentable.get(f.file);
+    const line = lines && [...Array(f.lineEnd - f.lineStart + 1).keys()].map((i) => f.lineStart + i).find((n) => lines.has(n));
+    if (line === undefined) continue;
+    seen.add(fp);
+    candidates.push({ fingerprint: fp, comment: { path: f.file, line, body: inlineBody(f) } });
+  }
+  return { current, candidates };
 }

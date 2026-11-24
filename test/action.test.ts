@@ -7,12 +7,13 @@ import { describe, expect, it } from "vitest";
 import { GitHubClient, assembleDiff, type Annotation, type Comment, type DirEntry, type PullFile } from "../action/github.ts";
 import { readInputs, readPullRequest } from "../action/main.ts";
 import type { FetchFn } from "../action/providers/http.ts";
-import { annotationsFor, checkTitle, clean, codeBlock, countFindings, gate, renderSummary, SUMMARY_MARKER, type Report } from "../action/publish.ts";
-import { countingFetch, reviewPullRequest, upsertSummaryComment, type Deps, type Inputs, type PrContext } from "../action/run.ts";
+import { parseExceptions } from "../action/exceptions.ts";
+import { annotationsFor, checkTitle, clean, codeBlock, countFindings, fingerprint, gate, inlineBody, MAX_INLINE_PER_RUN, planInline, renderSummary, staleBody, STALE_MARKER, SUMMARY_MARKER, type Report } from "../action/publish.ts";
+import { countingFetch, reviewPullRequest, syncInlineComments, upsertSummaryComment, type Deps, type Inputs, type PrContext } from "../action/run.ts";
 import { getBoolean, getChoice, getInput, getPositiveInt, setOutput } from "../action/runner.ts";
 import { loadStandards } from "../action/standards.ts";
 import type { LlmClient } from "../core/llm.ts";
-import type { Finding } from "../core/types.ts";
+import type { Finding, ParsedInput } from "../core/types.ts";
 
 // --- Helpers ---------------------------------------------------------------------------------
 
@@ -39,6 +40,7 @@ const inputs = (over: Partial<Inputs> = {}): Inputs => ({
   failOnIncomplete: false,
   checkRun: true,
   summaryComment: true,
+  inlineComments: false,
   maxAiCalls: 20,
   maxFiles: 50,
   ...over,
@@ -53,15 +55,21 @@ interface Recorded {
   dirRefs: string[];
   summaries: string[];
   warnings: string[];
+  reviews: { commitId: string; comments: { path: string; line: number; body: string }[] }[];
+  edited: { id: number; body: string }[];
 }
 
 function harness(over: { files?: PullFile[]; dir?: DirEntry[] | null; fileText?: Record<string, string>; comments?: Comment[]; checkRunError?: Error; makeClient?: Deps["makeClient"]; fetch?: FetchFn } = {}) {
-  const rec: Recorded = { checkRuns: [], created: [], updated: [], dirRefs: [], summaries: [], warnings: [] };
+  const rec: Recorded = { checkRuns: [], created: [], updated: [], dirRefs: [], summaries: [], warnings: [], reviews: [], edited: [] };
   const deps: Deps = {
     github: {
       listPullFiles: async () => over.files ?? [],
       listDirectory: async (_p, ref) => (rec.dirRefs.push(ref), over.dir === undefined ? null : over.dir),
-      getFileText: async (p) => over.fileText?.[p] ?? "",
+      getFileText: async (p) => {
+        const text = over.fileText?.[p];
+        if (text === undefined) throw Object.assign(new Error("Not Found"), { status: 404 });
+        return text;
+      },
       createCheckRun: async (i) => {
         if (over.checkRunError) throw over.checkRunError;
         rec.checkRuns.push(i);
@@ -70,12 +78,16 @@ function harness(over: { files?: PullFile[]; dir?: DirEntry[] | null; fileText?:
       listIssueComments: async () => over.comments ?? [],
       createComment: async (_n, body) => void rec.created.push(body),
       updateComment: async (id, body) => void rec.updated.push({ id, body }),
+      listReviewComments: async () => [],
+      createReview: async (_n, commitId, comments) => void rec.reviews.push({ commitId, comments }),
+      updateReviewComment: async (id, body) => void rec.edited.push({ id, body }),
     },
     summary: (md) => void rec.summaries.push(md),
     warn: (m) => void rec.warnings.push(m),
     info: () => {},
     makeClient: over.makeClient,
     fetch: over.fetch,
+    now: () => new Date("2026-11-24T12:00:00Z"),
   };
   return { deps, rec };
 }
@@ -477,5 +489,182 @@ describe("countingFetch", () => {
     await f("https://x.test");
     await expect(f("https://x.test")).rejects.toMatchObject({ retryable: false, message: "max-ai-calls (2) reached" });
     expect(used()).toBe(2);
+  });
+});
+
+// --- Exceptions ------------------------------------------------------------------------------
+
+describe("parseExceptions", () => {
+  const NOW = new Date("2026-11-24T12:00:00Z");
+  const stds = [{ id: "SEC-001" }, { id: "SEC-002" }];
+  const entry = (over: Record<string, string> = {}) =>
+    ["exceptions:", "  - standard: " + (over.standard ?? "SEC-002"), "    path: " + (over.path ?? "scripts/**"), "    reason: " + (over.reason ?? "Build script, input is a constant list."), "    approved-by: " + (over["approved-by"] ?? "octocat"), "    expires: " + (over.expires ?? "2027-01-31")].join("\n");
+  const ignoredWhy = (over: Record<string, string>) => parseExceptions(entry(over), stds, NOW).ignored[0];
+
+  it("reads a valid entry", () => {
+    expect(parseExceptions(entry(), stds, NOW)).toEqual({ active: [{ id: "exception-1", standardId: "SEC-002", pathPattern: "scripts/**", reason: "Build script, input is a constant list.", approvedBy: "octocat", expires: "2027-01-31" }], ignored: [] });
+  });
+  it("treats an empty file as no exceptions", () => {
+    expect(parseExceptions("", stds, NOW)).toEqual({ active: [], ignored: [] });
+  });
+  it("ignores, and says why, an entry that is expired, too far out, unknown or incomplete", () => {
+    expect(ignoredWhy({ expires: "2026-11-23" })).toBe("exception-1: expired on 2026-11-23");
+    expect(parseExceptions(entry({ expires: "2026-11-24" }), stds, NOW).active).toHaveLength(1); // valid through the end of its day
+    expect(ignoredWhy({ expires: "2027-06-01" })).toMatch(/more than 90 days away/);
+    expect(ignoredWhy({ expires: "2027-02-30" })).toMatch(/must be a date/);
+    expect(ignoredWhy({ standard: "NOPE-999" })).toMatch(/not one of this repository's standards/);
+    expect(ignoredWhy({ reason: "short" })).toMatch(/"reason" must be 10 to 2000/);
+    expect(ignoredWhy({ "approved-by": '""' })).toMatch(/"approved-by" is required/);
+    expect(ignoredWhy({ path: "'a b;c'" })).toMatch(/"path" must be a path glob/);
+  });
+  it("ignores a misspelled field instead of silently dropping it", () => {
+    expect(parseExceptions(entry() + "\n    aproved-by: me", stds, NOW).ignored[0]).toMatch(/unknown field\(s\) aproved-by/);
+  });
+  it("applies none, and says so, when the whole file is unusable", () => {
+    expect(parseExceptions("exceptions: [unclosed", stds, NOW)).toMatchObject({ active: [], ignored: [expect.stringMatching(/not valid YAML/)] });
+    expect(parseExceptions("- just a list", stds, NOW).ignored[0]).toMatch(/top-level "exceptions:" list/);
+  });
+  it("keeps the valid entries when one is bad", () => {
+    const two = entry() + "\n  - standard: SEC-001\n    path: '*'\n    reason: x\n    approved-by: a\n    expires: 2027-01-01";
+    const r = parseExceptions(two, stds, NOW);
+    expect(r.active.map((e) => e.id)).toEqual(["exception-1"]);
+    expect(r.ignored[0]).toMatch(/^exception-2: "reason"/);
+  });
+});
+
+describe("exceptions in a review", () => {
+  const files = [added("src/config.ts", SECRET_LINE)];
+  const exc = (expires = "2027-01-15") => `exceptions:\n  - standard: SEC-001\n    path: src/**\n    reason: Fixture value, not a credential.\n    approved-by: maintainer\n    expires: ${expires}\n`;
+
+  it("waives the finding: no violation, success, and the summary says who approved and why", async () => {
+    const { deps, rec } = harness({ files, fileText: { ".guardrail/exceptions.yaml": exc() } });
+    const out = await reviewPullRequest(pr(), inputs(), deps);
+    expect(out).toMatchObject({ verdict: "pass", conclusion: "success" });
+    expect(out.counts.violations).toBe(0);
+    expect(rec.checkRuns[0]!.annotations).toEqual([]);
+    expect(rec.created[0]).toContain("1 waived by exceptions");
+    expect(rec.created[0]).toContain("waived by `exception-1` (approved by maintainer, until 2027-01-15): Fixture value, not a credential.");
+  });
+  it("doesn't apply an expired exception, and says so", async () => {
+    const { deps, rec } = harness({ files, fileText: { ".guardrail/exceptions.yaml": exc("2026-11-01") } });
+    const out = await reviewPullRequest(pr(), inputs(), deps);
+    expect(out.verdict).toBe("fail");
+    expect(rec.created[0]).toContain("Exceptions not applied");
+    expect(rec.created[0]).toContain("exception-1: expired on 2026-11-01");
+  });
+  it("doesn't waive other paths", async () => {
+    const { deps } = harness({ files: [added("lib/config.ts", SECRET_LINE)], fileText: { ".guardrail/exceptions.yaml": exc() } });
+    expect((await reviewPullRequest(pr(), inputs(), deps)).verdict).toBe("fail");
+  });
+  it("notes when the PR itself edits the exceptions file", async () => {
+    const { deps, rec } = harness({ files: [added(".guardrail/exceptions.yaml", "exceptions: []")] });
+    await reviewPullRequest(pr(), inputs(), deps);
+    expect(rec.created[0]).toContain("changes the exceptions file");
+  });
+});
+
+// --- Inline comments -------------------------------------------------------------------------
+
+describe("inline comments", () => {
+  const f = (over: Partial<Finding> = {}) => finding({ evidence: 'const k = "secret"', lineStart: 5, lineEnd: 5, ...over });
+  const lines = (...n: number[]) => new Map([["a.ts", new Set(n)]]);
+
+  it("fingerprints by standard, file and quoted code, not by line", () => {
+    expect(fingerprint(f())).toBe(fingerprint(f({ lineStart: 40, lineEnd: 40 })));
+    expect(fingerprint(f())).toBe(fingerprint(f({ evidence: '  const k  =  "secret"  ' })));
+    expect(fingerprint(f())).not.toBe(fingerprint(f({ standardId: "SEC-002" })));
+    expect(fingerprint(f())).not.toBe(fingerprint(f({ file: "b.ts" })));
+    expect(fingerprint(f())).toMatch(/^[0-9a-f]{16}$/);
+  });
+  it("plans only unwaived violations on lines the diff shows, once per fingerprint", () => {
+    const plan = planInline(
+      [f(), f({ lineStart: 6, lineEnd: 6 }), f({ standardId: "REL-002", lineStart: 99, lineEnd: 99, evidence: "x" }), f({ classification: "suggestion", evidence: "y" }), f({ waivedBy: "e1", evidence: "z" })],
+      lines(5, 6),
+    );
+    expect(plan.candidates.map((c) => [c.comment.path, c.comment.line])).toEqual([["a.ts", 5]]);
+    expect(plan.current.size).toBe(2); // the off-diff REL-002 still counts as found, so its old comment isn't marked gone
+  });
+  it("comments on the first line of a range that the diff shows", () => {
+    expect(planInline([f({ lineStart: 4, lineEnd: 6 })], lines(5, 6)).candidates[0]!.comment.line).toBe(5);
+  });
+  it("neutralises model text in the body and carries the fingerprint", () => {
+    const body = inlineBody(f({ explanation: "Hi @everyone [x](http://e.test)" }));
+    expect(body).not.toContain("@everyone");
+    expect(body).not.toContain("[x](");
+    expect(body).toContain(`<!-- guardrail:fp:${fingerprint(f())} -->`);
+  });
+  it("marks a stale comment once, keeping the fingerprint", () => {
+    const body = inlineBody(f());
+    const stale = staleBody(body, "abcdef123456");
+    expect(stale).toContain(STALE_MARKER);
+    expect(stale).toContain("No longer detected in `abcdef1`");
+    expect(stale).toContain(`guardrail:fp:${fingerprint(f())}`);
+    expect(staleBody(stale, "1234567890")).toBe(staleBody(body, "1234567890"));
+  });
+
+  const input = (): ParsedInput => ({ kind: "diff", files: [{ path: "a.ts", isTest: false, lines: [5, 6].map((n) => ({ n, text: "x", added: true })) }], coverage: { filesTotal: 1, filesReviewed: 1, skipped: [] } });
+  const api = (existing: { id: number; body?: string; user?: { type: string } }[] = []) => {
+    const log = { reviews: [] as { commitId: string; comments: { path: string; line: number; body: string }[] }[], edits: [] as { id: number; body: string }[] };
+    const gh = {
+      listReviewComments: async () => existing,
+      createReview: async (_n: number, commitId: string, comments: { path: string; line: number; body: string }[]) => void log.reviews.push({ commitId, comments }),
+      updateReviewComment: async (id: number, body: string) => void log.edits.push({ id, body }),
+    };
+    return { log, gh };
+  };
+
+  it("posts new violations as one review on the reviewed commit", async () => {
+    const { gh, log } = api();
+    const msg = await syncInlineComments(gh, pr(), [f(), f({ standardId: "REL-002", lineStart: 6, lineEnd: 6, evidence: "q" })], input());
+    expect(log.reviews).toHaveLength(1);
+    expect(log.reviews[0]!.commitId).toBe("h".repeat(40));
+    expect(log.reviews[0]!.comments.map((c) => c.line)).toEqual([5, 6]);
+    expect(msg).toContain("2 new");
+  });
+  it("doesn't post a comment twice", async () => {
+    const { gh, log } = api([{ id: 1, body: inlineBody(f()), user: { type: "Bot" } }]);
+    await syncInlineComments(gh, pr(), [f()], input());
+    expect(log.reviews).toEqual([]);
+    expect(log.edits).toEqual([]);
+  });
+  it("marks a comment whose finding is gone, only once, and only the Action's own", async () => {
+    const { gh, log } = api([
+      { id: 1, body: inlineBody(f()), user: { type: "Bot" } },
+      { id: 2, body: staleBody(inlineBody(f({ evidence: "old" })), "aaaaaaa"), user: { type: "Bot" } },
+      { id: 3, body: inlineBody(f({ evidence: "person" })), user: { type: "User" } },
+    ]);
+    await syncInlineComments(gh, pr(), [], input());
+    expect(log.edits.map((e) => e.id)).toEqual([1]);
+    expect(log.edits[0]!.body).toContain(STALE_MARKER);
+  });
+  it("restores a stale comment when its finding comes back, without posting a duplicate", async () => {
+    const { gh, log } = api([{ id: 1, body: staleBody(inlineBody(f()), "aaaaaaa"), user: { type: "Bot" } }]);
+    await syncInlineComments(gh, pr(), [f()], input());
+    expect(log.edits).toEqual([{ id: 1, body: inlineBody(f()) }]);
+    expect(log.reviews).toEqual([]);
+  });
+  it(`posts at most ${MAX_INLINE_PER_RUN} new comments and says how many were left`, async () => {
+    const { gh, log } = api();
+    const many = Array.from({ length: 30 }, (_, i) => f({ evidence: `e${i}` }));
+    const msg = await syncInlineComments(gh, pr(), many, input());
+    expect(log.reviews[0]!.comments).toHaveLength(MAX_INLINE_PER_RUN);
+    expect(msg).toContain("5 more not posted");
+  });
+
+  it("is off by default, on when asked, and never runs for a fork pull request", async () => {
+    const files = [added("src/config.ts", SECRET_LINE)];
+    const off = harness({ files });
+    await reviewPullRequest(pr(), inputs(), off.deps);
+    expect(off.rec.reviews).toEqual([]);
+
+    const on = harness({ files });
+    await reviewPullRequest(pr(), inputs({ inlineComments: true }), on.deps);
+    expect(on.rec.reviews).toHaveLength(1);
+    expect(on.rec.reviews[0]!.comments[0]).toMatchObject({ path: "src/config.ts", line: 1 });
+    expect(JSON.stringify(on.rec.reviews)).not.toContain("abcd1234abcd1234");
+
+    const fork = harness({ files });
+    await reviewPullRequest(pr({ isFork: true }), inputs({ inlineComments: true }), fork.deps);
+    expect(fork.rec.reviews).toEqual([]);
   });
 });

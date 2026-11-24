@@ -22,6 +22,7 @@ export function readInputs(env = process.env): Inputs {
     failOnIncomplete: getBoolean("fail-on-incomplete", false, env),
     checkRun: getBoolean("check-run", true, env),
     summaryComment: getBoolean("summary-comment", true, env),
+    inlineComments: getBoolean("inline-comments", false, env),
     maxAiCalls: getPositiveInt("max-ai-calls", 20, env),
     maxFiles: getPositiveInt("max-files", 50, env),
   };

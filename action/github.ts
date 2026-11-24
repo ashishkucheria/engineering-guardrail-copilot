@@ -40,6 +40,16 @@ export interface Comment {
   user?: { type?: string } | null;
 }
 
+export interface ReviewComment extends Comment {
+  path?: string;
+}
+
+export interface InlineComment {
+  path: string;
+  line: number;
+  body: string;
+}
+
 export interface GitHubOptions {
   token: string;
   /** "owner/name" */
@@ -135,6 +145,17 @@ export class GitHubClient {
       await this.json("PATCH", `/check-runs/${created.id}`, { output: { title: input.title, summary: input.summary, annotations: batch } });
     }
     return created.id;
+  }
+
+  listReviewComments(number: number): Promise<ReviewComment[]> {
+    return this.paged<ReviewComment>(`/pulls/${number}/comments`);
+  }
+  /** One pull request review holding all the comments, on the commit that was reviewed. */
+  async createReview(number: number, commitId: string, comments: InlineComment[]): Promise<void> {
+    await this.json("POST", `/pulls/${number}/reviews`, { commit_id: commitId, event: "COMMENT", comments: comments.map((c) => ({ path: c.path, line: c.line, side: "RIGHT", body: c.body })) });
+  }
+  async updateReviewComment(id: number, body: string): Promise<void> {
+    await this.json("PATCH", `/pulls/comments/${id}`, { body });
   }
 
   listIssueComments(number: number): Promise<Comment[]> {

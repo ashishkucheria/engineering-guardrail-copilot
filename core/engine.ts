@@ -35,7 +35,7 @@ export interface ReviewResult {
   engine: string;
 }
 
-export async function review(raw: string, standards: Standard[], detectors: Detector[] = [ruleDetector], limits?: InputLimits): Promise<ReviewResult> {
+export async function review(raw: string, standards: Standard[], detectors: Detector[] = [ruleDetector], limits?: InputLimits, exceptions: ActiveException[] = []): Promise<ReviewResult> {
   const input = parseInput(raw, limits);
   const enabled = standards.filter((s) => s.enabled);
   const skipped: Coverage["skipped"] = [];
@@ -45,7 +45,7 @@ export async function review(raw: string, standards: Standard[], detectors: Dete
     all.push(...r.findings);
     skipped.push(...(r.skipped ?? []));
   }
-  return { input, ...finalize(input, all, skipped), engine: detectors.map((d) => d.name).join("+") };
+  return { input, ...finalize(input, all, skipped, exceptions), engine: detectors.map((d) => d.name).join("+") };
 }
 
 /** Findings kept per review (design §5). Past this the rest are dropped and the gap is recorded. */
