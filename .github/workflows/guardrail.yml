@@ -1,0 +1,26 @@
+# This repository reviews its own pull requests with the Action it ships (rules only, so no key is
+# needed). Other repositories use it as ashishkucheria/engineering-guardrail-copilot@v1; see
+# docs/pr-reviewer-design.md.
+name: Guardrail
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+
+concurrency:
+  group: guardrail-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4 # needed only to run the Action from this checkout (uses: ./)
+      - uses: ./
+        with:
+          provider: none

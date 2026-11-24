@@ -1,0 +1,70 @@
+name: Guardrail PR reviewer
+description: Review pull requests against your repository's engineering standards, with the AI provider and key you choose.
+author: ashishkucheria
+branding:
+  icon: shield
+  color: blue
+
+inputs:
+  provider:
+    description: "openai-compatible, anthropic, gemini, workers-ai, or none (rules only, nothing leaves the runner)"
+    required: false
+    default: none
+  model:
+    description: Model name. Defaults per provider (gpt-6-luna, claude-opus-5-5, gemini-3.5-flash-lite, a Llama 3.3 model on Workers AI).
+    required: false
+  api-key:
+    description: Provider API key. Pass it from a secret.
+    required: false
+  base-url:
+    description: "openai-compatible only. Default: https://api.openai.com/v1"
+    required: false
+  cloudflare-account-id:
+    description: workers-ai only.
+    required: false
+  standards-path:
+    description: Folder of standard YAML files in the reviewed repository, read from the pull request's base commit. Built-in standards apply when it doesn't exist.
+    required: false
+    default: .guardrail/standards
+  fail-on:
+    description: "none (advisory), blocker (fail on any blocker), or major (fail on any blocker or major)"
+    required: false
+    default: none
+  fail-on-incomplete:
+    description: Fail the check when part of the pull request couldn't be reviewed.
+    required: false
+    default: "false"
+  check-run:
+    description: Create the "Guardrail" check run with annotations on the changed lines.
+    required: false
+    default: "true"
+  summary-comment:
+    description: Keep one summary comment up to date on the pull request.
+    required: false
+    default: "true"
+  max-ai-calls:
+    description: Upper bound on provider requests per run, retries included.
+    required: false
+    default: "20"
+  max-files:
+    description: Files reviewed per pull request; the rest are listed as not reviewed.
+    required: false
+    default: "50"
+  github-token:
+    description: Token for reading the pull request and writing results.
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  verdict:
+    description: pass, warn, fail or incomplete
+  violations:
+    description: Number of violations
+  blockers:
+    description: Number of blocker violations
+  incomplete:
+    description: "true when part of the pull request couldn't be reviewed"
+
+runs:
+  using: node24
+  main: dist/action/index.cjs
