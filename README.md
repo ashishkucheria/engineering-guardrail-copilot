@@ -57,19 +57,28 @@ What works (tested; see below):
     pipeline log records it. The findings stay on record, marked waived.
   - Later reviews get matching findings waived by the `apply-exceptions` step until the exception expires.
   - "Active" and "expired" are worked out from the expiry date, never stored, so an exception can't be left stale.
+  - Approving a pattern that covers every path (such as `*` or `**`), or any exception to a blocker standard,
+    needs a written decision note. The note is shown on the exception and in the source review's log.
+  - An approver can **revoke** an active exception early, with a required note. Findings it already waived stay
+    waived; later reviews aren't waived. The source review's log records the revocation.
+  - One person can have at most 5 pending requests at a time.
+  - Path patterns are matched without regular expressions, in time linear in the pattern and path length.
 - **Feedback:** the author or an approver can accept or reject a finding (rejecting needs a reason). Feedback is a
   signal for the dashboard and for people. It never changes the finding or the verdict, and **ten rejections
   don't stop a finding from being reported next time** (a hard gate in the smoke test). Detection and the waiver
   step have no input that could carry feedback.
 - **History, where it can't suppress anything:** next to each finding, how that standard's findings fared in
   other reviews (accepted, rejected, disputed, and the latest rejection reasons). The chat sees the same history.
-- **Chat** about a review: it sees the findings, the standards involved, active exceptions, that history and the
-  last 10 messages. It's advisory only: no tools, and it can't accept, reject, challenge or waive anything. Each
-  question costs one AI call from the daily budget. The review data sits between randomly tagged markers, like the
-  code in detection.
+- **Chat** about a review, for its author or an approver: it sees the findings (at most 40, worst first, long
+  text clipped, and the prompt says how many were left out), the standards involved, active exceptions, that
+  history and the last 10 messages. It's advisory only: no tools, and it can't accept, reject, challenge or waive
+  anything. Each question costs one AI call from the daily budget; each person can ask 5 a day, and chat stops
+  5 calls before the budget runs out so reviews and challenges keep some. The review data sits between randomly
+  tagged markers, like the code in detection.
 - **Dashboard:** reviews by verdict, violations by severity (waived ones left out), the most frequent standards,
   accept/reject counts and reject rate per standard, challenges (upheld and disputed by the author), exceptions
-  (pending, active, expired, denied) and today's AI budget. All are read live from D1. "Accepted" stands in for
+  (pending, active, expired, denied, revoked) and today's AI budget. "Violations waived" and "most frequent
+  standards" count violations only; the latter leaves out waived ones. All are read live from D1. "Accepted" stands in for
   "remediated", because the app can't see whether a fix landed.
 - **Cost protection** (design §10): per-IP rate limits (5 reviews and 10 challenges a minute; polling a running
   review has its own, looser limit) and a strict daily cap on AI calls in D1. Every model call, retries included,
@@ -130,13 +139,19 @@ told to fail. The smoke test uses it to check the whole pipeline without AI call
   - Approval waives the source finding and recomputes that review's verdict in SQL. The test checks the result
     against the verdict rules.
   - A later review of the same path is waived; another path isn't.
-- Chat answers, is stored with who asked, and spends one budget call.
+- Chat is refused (`403`) for anyone but the author or an approver, answers, is stored with who asked, and
+  spends one budget call. The 6th question from one person in a day gets `429`, and chat gets `429` once only 5
+  calls are left while a review still gets the AI.
+- Approving a blocker exception without a note is `400`. Revoking needs an approver and a note; two revokes at
+  once give one `200` and one `409`; the source review stays waived and a new review isn't. A 6th pending
+  request from one person is `409`. A pattern that would hang a regex is rejected at once.
 - The dashboard's numbers move exactly as expected, step by step: a new review, a rejection, an exception
   request, and an approval.
 - Everything from 3-A: 401/403/404/405/413, audited toggles, snapshots, redaction regressions.
 
 The smoke test makes more fake AI calls than the real daily budget allows, so `.dev.vars.example` raises
-`DAILY_LLM_CALLS_APP` for fake mode. Delete that line before switching to `workers-ai`.
+`DAILY_LLM_CALLS_APP` for fake mode. That value is ignored above 20 unless `LLM_MODE=fake`. The smoke test
+also uses up the day's chat questions; `npm run budget:reset:local` resets both before a re-run.
 
 ## Eval harness
 
@@ -196,8 +211,11 @@ docs/        design
 - Approving an exception waives findings in the review it was requested from and in reviews that start after it.
   It doesn't touch other past reviews, or a review already running when it was approved. An exception that
   expires doesn't un-waive past reviews; it only stops waiving new ones.
-- Rejection reasons, from any user, reach the chat model as data, so a reason could try to steer the chat. The
-  chat is advisory and can't change anything; the reasons sit inside tagged markers, and the prompt says they are
-  opinions, not proof.
+- Rejection reasons, from any user, reach the chat model as data, in other users' chats too (for any review with
+  the same standard), so a reason could try to steer the chat. Accepted risk (review of PR #4): the chat is
+  advisory and can't change anything, the reasons sit inside tagged markers, and the prompt says they are
+  opinions, not proof. The worst case is misleading advice.
+- A chat question counts against the person's daily 5 even if the AI budget then refuses it (`429`). Over-counting
+  errs on the safe side, like the budget itself.
 - Rejecting the same finding repeatedly is allowed. Each rejection is kept in the feedback history, but the
   dashboard counts each finding's latest disposition once.

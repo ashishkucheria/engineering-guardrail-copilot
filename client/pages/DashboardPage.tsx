@@ -35,13 +35,13 @@ export function DashboardPage() {
           <Tile label="Major violations" value={d.violationsBySeverity.major} />
           <Tile label="Minor violations" value={d.violationsBySeverity.minor} />
           <Tile label="Suggestions" value={d.suggestions} />
-          <Tile label="Waived by exceptions" value={d.waived} />
+          <Tile label="Violations waived" value={d.waived} />
         </div>
-        <p className="muted small">Violation counts leave out findings waived by an exception.</p>
+        <p className="muted small">Violation counts leave out findings waived by an exception; "Violations waived" counts only those.</p>
         {d.topStandards.length > 0 && (
           <table className="table compact">
             <thead>
-              <tr><th>Most frequent standards</th><th>Findings</th></tr>
+              <tr><th>Most frequent standards</th><th>Violations (not waived)</th></tr>
             </thead>
             <tbody>
               {d.topStandards.map((s) => (
@@ -86,6 +86,7 @@ export function DashboardPage() {
           <Tile label="Active" value={d.exceptions.active} />
           <Tile label="Expired" value={d.exceptions.expired} />
           <Tile label="Denied" value={d.exceptions.denied} />
+          <Tile label="Revoked" value={d.exceptions.revoked} />
           <Tile label={`AI calls today (${d.budget.day})`} value={`${d.budget.app.used} / ${d.budget.app.limit}`} />
         </div>
       </section>

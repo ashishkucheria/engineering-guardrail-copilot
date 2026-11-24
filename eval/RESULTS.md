@@ -49,6 +49,13 @@ recall row above puts both on the same 19 expected findings.
   is a major, not a blocker, so this gives a warning, not a failed change.
 - **Model calls.** About 25 a run, which is most of a day's Workers AI free allocation.
 
+**Open follow-up:** this false positive is the kind flagged in the PR #3 review: verification proves the quoted
+line exists, not that it breaks the rule. It's a warning, so it doesn't stop a change. It stays on the list rather
+than being tuned away against this one case.
+
+**Run metadata:** results saved from now on record the git commit, prompt version, model id, temperature and seed
+(`run` in the JSON). The 2026-11-24 files were saved before that and only have the config description.
+
 ### Compared with the earlier v2 run (2026-11-23, 22 cases)
 
 The v2 run had 3 false positives and 2 false blockers (80% blocker precision): placeholders such as

@@ -52,3 +52,24 @@ export function canDecideException(user: User, e: { requestedBy: string; status:
   if (e.status !== "pending") return conflict(`This exception was already ${e.status}.`);
   return allow;
 }
+
+/**
+ * Chat about a review: its author or an approver, like feedback (review of PR #4, item 3). Every
+ * question spends a model call from the shared daily budget, so a bystander mustn't be able to
+ * spend it on someone else's review.
+ */
+export function canChat(user: User, reviewAuthorId: string): Decision {
+  return user.role === "approver" || user.id === reviewAuthorId ? allow : deny("Only the author of the review or an approver can chat about it.");
+}
+
+/**
+ * Revoking ends an approved exception early. Any approver may do it, the original approver or
+ * requester included: it only narrows what is waived. Pending, denied, already revoked or expired
+ * exceptions have nothing to revoke (409).
+ */
+export function canRevokeException(user: User, e: { status: string; expiresAt: string }, now: Date): Decision {
+  if (user.role !== "approver") return deny("Only approvers can revoke exceptions.");
+  if (e.status !== "approved") return conflict(`This exception is ${e.status}, so there is nothing to revoke.`);
+  if (Date.parse(e.expiresAt) <= now.getTime()) return conflict("This exception has already expired.");
+  return allow;
+}

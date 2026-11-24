@@ -78,6 +78,7 @@ export const api = {
   requestException: (body: ExceptionRequestBody) => call<ExceptionView>("POST", "/api/exceptions", body),
   exceptions: (state?: ExceptionView["state"]) => call<ExceptionView[]>("GET", `/api/exceptions${state ? `?status=${state}` : ""}`),
   decideException: (id: string, decision: "approve" | "deny", note?: string) => call<ExceptionView>("POST", `/api/exceptions/${encodeURIComponent(id)}/decision`, { decision, note }),
+  revokeException: (id: string, note: string) => call<ExceptionView>("POST", `/api/exceptions/${encodeURIComponent(id)}/revoke`, { note }),
   chat: (reviewId: string, message: string) => call<ChatResult>("POST", `/api/reviews/${encodeURIComponent(reviewId)}/chat`, { message }),
   dashboard: () => call<DashboardView>("GET", "/api/dashboard"),
   reviews: () => call<ReviewSummary[]>("GET", "/api/reviews"),

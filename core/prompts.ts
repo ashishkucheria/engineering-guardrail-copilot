@@ -153,6 +153,23 @@ export function buildChallengeMessages(c: ChallengeContext): ChatMessage[] {
 // verdict: it has no tools, and accept, reject, challenge and exceptions are separate API calls.
 
 export const MAX_CHAT_HISTORY = 10;
+/**
+ * At most this many findings go into the chat prompt, worst first, with long text clipped, so a big
+ * review stays well inside the model's context window (review of PR #4). The prompt says how many
+ * were left out.
+ */
+export const MAX_CHAT_FINDINGS = 40;
+const CLIP_EVIDENCE = 300;
+const CLIP_EXPLANATION = 400;
+const CLIP_REASON = 300;
+
+const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
+const SEVERITY_RANK: Record<string, number> = { blocker: 0, major: 1, minor: 2 };
+
+/** Unwaived violations first, then by severity; suggestions and waived findings last. */
+function chatRank(f: ChatFinding): number {
+  return (f.waived ? 20 : 0) + (f.classification === "violation" ? 0 : 10) + (SEVERITY_RANK[f.severity] ?? 3);
+}
 
 const CHAT_SYSTEM = `You answer questions about one code review for the developer and approvers looking at it.
 
@@ -207,20 +224,31 @@ export interface ChatContext {
 export function buildChatMessages(c: ChatContext): ChatMessage[] {
   const lines: string[] = [];
   lines.push(`Review: ${c.review.inputKind} by ${c.review.author}, verdict ${c.review.verdict ?? "not decided yet"}.`);
-  lines.push("", `Findings (${c.findings.length}):`);
-  for (const f of c.findings) {
+  const shown = c.findings
+    .map((f, i) => ({ f, i }))
+    .sort((a, b) => chatRank(a.f) - chatRank(b.f) || a.i - b.i)
+    .slice(0, MAX_CHAT_FINDINGS)
+    .map((x) => x.f);
+  const hidden = c.findings.length - shown.length;
+  lines.push(
+    "",
+    hidden > 0
+      ? `Findings (${c.findings.length}; the ${shown.length} most severe are listed, ${hidden} more are not shown here — say so if asked about them):`
+      : `Findings (${c.findings.length}):`,
+  );
+  for (const f of shown) {
     const flags = [f.preExisting && "pre-existing", f.waived && "waived by an approved exception", f.disposition !== "open" && f.disposition, f.challengeOutcome && `challenge ${f.challengeOutcome}`].filter(Boolean);
     lines.push(`- ${f.standardId} ${f.standardTitle ?? ""} | ${f.severity} ${f.classification} | ${f.file}:${f.lineStart}${f.lineEnd !== f.lineStart ? `-${f.lineEnd}` : ""}${flags.length ? ` | ${flags.join(", ")}` : ""}`);
-    lines.push(`  evidence: ${f.evidence}`, `  explanation: ${f.explanation}`);
+    lines.push(`  evidence: ${clip(f.evidence, CLIP_EVIDENCE)}`, `  explanation: ${clip(f.explanation, CLIP_EXPLANATION)}`);
   }
   lines.push("", "Standards involved:");
   for (const s of c.standards) lines.push(`- ${s.id} ${s.title}: ${s.rule.trim()}`);
   lines.push("", `Active exceptions for these standards (${c.exceptions.length}):`);
-  for (const e of c.exceptions) lines.push(`- ${e.standardId} on ${e.pathPattern}, expires ${e.expiresAt}: ${e.justification}`);
+  for (const e of c.exceptions) lines.push(`- ${e.standardId} on ${e.pathPattern}, expires ${e.expiresAt}: ${clip(e.justification, CLIP_REASON)}`);
   lines.push("", "History in other reviews:");
   for (const h of c.history) {
     lines.push(`- ${h.standardId}: accepted ${h.accepted}, rejected ${h.rejected}, disputed by the author ${h.disputed}`);
-    for (const r of h.recentReasons) lines.push(`  rejection reason: ${r}`);
+    for (const r of h.recentReasons) lines.push(`  rejection reason: ${clip(r, CLIP_REASON)}`);
   }
   const data = lines.join("\n");
   const tag = delimiterTag(data, c.question, ...c.messages.map((m) => m.content));

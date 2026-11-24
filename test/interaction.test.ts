@@ -1,9 +1,10 @@
 // PR 3-C: exceptions, the approval rules, feedback ownership and chat (design §4, §6).
 import { describe, expect, it } from "vitest";
 import { finalize, review } from "../core/engine.ts";
-import { applyExceptions, expiresAt, globMatch, isActive, isExpired, validateExceptionRequest, type ActiveException } from "../core/exceptions.ts";
-import { canDecideException, canGiveFeedback, canRequestException } from "../core/policy.ts";
-import { buildChatMessages, buildDetectionMessages, MAX_CHAT_HISTORY, type ChatContext } from "../core/prompts.ts";
+import { applyExceptions, approvalNoteRequirement, expiresAt, globMatch, isActive, isBroadPattern, isExpired, validateExceptionRequest, type ActiveException } from "../core/exceptions.ts";
+import { canChat, canDecideException, canGiveFeedback, canRequestException, canRevokeException } from "../core/policy.ts";
+import { buildChatMessages, buildDetectionMessages, MAX_CHAT_FINDINGS, MAX_CHAT_HISTORY, type ChatContext } from "../core/prompts.ts";
+import { appLimit, REAL_MODEL_APP_CEILING } from "../core/budget.ts";
 import { parseInput } from "../core/diff.ts";
 import { planChunks } from "../core/chunk.ts";
 import type { Finding, User } from "../core/types.ts";
@@ -45,6 +46,57 @@ describe("approval rules (design §4)", () => {
     expect(canRequestException(dev, dev.id).ok).toBe(true);
     expect(canRequestException(approver, dev.id).ok).toBe(true);
     expect(canRequestException(dev2, dev.id)).toMatchObject({ ok: false, code: "forbidden" });
+  });
+});
+
+describe("revoking and the decision-note guard (review of PR #4, item 2; prompt 11)", () => {
+  const now = new Date("2026-06-01T00:00:00Z");
+  const active = { status: "approved", expiresAt: "2026-07-01T00:00:00Z" };
+  it("any approver can revoke an active exception, including its approver or requester", () => {
+    expect(canRevokeException(approver, active, now)).toEqual({ ok: true });
+    expect(canRevokeException(approver2, active, now)).toEqual({ ok: true });
+  });
+  it("developers can't revoke", () => {
+    expect(canRevokeException(dev, active, now)).toMatchObject({ ok: false, code: "forbidden" });
+  });
+  it("pending, denied, revoked and expired exceptions have nothing to revoke (409)", () => {
+    for (const status of ["pending", "denied", "revoked"]) {
+      expect(canRevokeException(approver, { ...active, status }, now)).toMatchObject({ ok: false, code: "conflict" });
+    }
+    expect(canRevokeException(approver, { ...active, expiresAt: "2026-06-01T00:00:00Z" }, now)).toMatchObject({ ok: false, code: "conflict" });
+  });
+  it.each([
+    ["*", true],
+    ["**", true],
+    ["**/*", true],
+    ["*/*", true],
+    ["?", true],
+    ["src/**", false],
+    ["*.ts", false],
+    ["snippet", false],
+  ])("%s covers every path: %s", (pattern, broad) => {
+    expect(isBroadPattern(pattern)).toBe(broad);
+  });
+  it("approving a broad pattern or a blocker standard needs a note; a narrow major one doesn't", () => {
+    expect(approvalNoteRequirement("*", "minor")).toMatch(/covers every path/);
+    expect(approvalNoteRequirement("test/**", "blocker")).toMatch(/blocker/);
+    expect(approvalNoteRequirement("**", "blocker")).toMatch(/every path and the standard is a blocker/);
+    expect(approvalNoteRequirement("test/**", "major")).toBeNull();
+  });
+});
+
+describe("chat is for the author or an approver (review of PR #4, item 3)", () => {
+  it("follows the feedback rule", () => {
+    expect(canChat(dev, dev.id).ok).toBe(true);
+    expect(canChat(approver, dev.id).ok).toBe(true);
+    expect(canChat(dev2, dev.id)).toMatchObject({ ok: false, code: "forbidden" });
+  });
+  it(`a real model never gets more than ${REAL_MODEL_APP_CEILING} app calls a day; only the fake model may`, () => {
+    expect(appLimit("60", "workers-ai")).toBe(REAL_MODEL_APP_CEILING);
+    expect(appLimit("60", "off")).toBe(REAL_MODEL_APP_CEILING);
+    expect(appLimit("60", "fake")).toBe(60);
+    expect(appLimit("10", "workers-ai")).toBe(10);
+    expect(appLimit("junk", "fake")).toBe(0);
   });
 });
 
@@ -100,8 +152,27 @@ describe("globMatch", () => {
     ["src/?.ts", "src/a.ts", true],
     ["src/?.ts", "src/ab.ts", false],
     ["src/a.ts", "src/a_ts", false],
+    ["**", "a/b/c.ts", true],
+    ["**/*.ts", "a.ts", true],
+    ["**/*.ts", "a/b.ts", true],
+    ["src/***/a.ts", "src/x/y/a.ts", true],
+    ["src/**/a.ts", "src/a.ts", true],
+    ["src/**/a.ts", "srcx/a.ts", false],
+    ["*a*b", "xaybz", false],
+    ["*a*b", "xayb", true],
+    ["a*", "a/b", false],
   ])("%s vs %s → %s", (pattern, path, expected) => {
     expect(globMatch(pattern, path)).toBe(expected);
+  });
+  it("runs in linear time on patterns that make a backtracking regex hang (review of PR #4)", () => {
+    const evil = "*a*a*a*a*a*a*a*a*b"; // took 2.5 s as a regex on a 40-character path
+    const many = "*a".repeat(99) + "*b"; // 200 characters, the longest pattern allowed
+    const t0 = performance.now();
+    expect(globMatch(evil, "a".repeat(40))).toBe(false);
+    expect(globMatch(many, "a".repeat(2_000))).toBe(false);
+    expect(globMatch("**a**a**a**a**a**b", "a/".repeat(1_000))).toBe(false);
+    expect(globMatch(evil, "a".repeat(40) + "b")).toBe(true);
+    expect(performance.now() - t0).toBeLessThan(200);
   });
 });
 
@@ -182,6 +253,22 @@ describe("chat prompt", () => {
     const msgs = buildChatMessages({ ...base, messages });
     const sent = msgs.slice(3, -1).map((m) => m.content);
     expect(sent).toEqual(messages.slice(-MAX_CHAT_HISTORY).map((m) => m.content));
+  });
+
+  it(`sends at most ${MAX_CHAT_FINDINGS} findings, worst first, clipped, and says how many were left out`, () => {
+    const one = base.findings[0]!;
+    const findings = [
+      ...Array.from({ length: 150 }, (_, i) => ({ ...one, standardId: "MNT-001", severity: "minor", classification: "suggestion", file: `s${i}.ts`, evidence: "x".repeat(5_000) })),
+      { ...one, file: "worst.ts" },
+      { ...one, file: "waived.ts", waived: true },
+    ];
+    const data = buildChatMessages({ ...base, findings })[1]!.content;
+    expect(data).toContain(`Findings (152; the ${MAX_CHAT_FINDINGS} most severe are listed, 112 more are not shown here`);
+    const listed = data.split("\n").filter((l) => /^- [A-Z]+-\d{3} /.test(l) && l.includes(" | "));
+    expect(listed).toHaveLength(MAX_CHAT_FINDINGS);
+    expect(listed[0]).toContain("worst.ts");
+    expect(data).not.toContain("waived.ts");
+    expect(data.length).toBeLessThan(40_000);
   });
 
   it("marks waived and pre-existing findings", () => {

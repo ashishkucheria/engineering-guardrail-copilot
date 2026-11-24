@@ -59,7 +59,8 @@ export function ReviewResult({ review, showSnapshot = false, onChanged }: { revi
               finding still counts toward the verdict: only an approved exception can waive a violation.
             </p>
           )}
-          {review.status === "complete" && <ChatPanel review={review} onChanged={onChanged} />}
+          {/* Chat follows the feedback rule: the author or an approver (review of PR #4, item 3). */}
+          {review.status === "complete" && review.viewerCanGiveFeedback && <ChatPanel review={review} onChanged={onChanged} />}
         </>
       )}
 
@@ -184,8 +185,11 @@ function FindingCard({
       {f.waiver && (
         <div className="small waiver-note">
           Waived by exception <code>{f.waiver.id}</code> for <code>{f.waiver.pathPattern}</code>
-          {f.waiver.decidedBy ? `, approved by ${f.waiver.decidedBy.name}` : ""}, expires {new Date(f.waiver.expiresAt).toLocaleDateString()}. It stays on
-          record but doesn't count toward the verdict.
+          {f.waiver.decidedBy ? `, approved by ${f.waiver.decidedBy.name}` : ""}
+          {f.waiver.revokedAt
+            ? `, revoked ${new Date(f.waiver.revokedAt).toLocaleDateString()} (this review stays waived; later reviews aren't)`
+            : `, expires ${new Date(f.waiver.expiresAt).toLocaleDateString()}`}
+          . It stays on record but doesn't count toward the verdict.
         </div>
       )}
       {history && <HistoryNote h={history} />}
@@ -360,7 +364,8 @@ function ChatPanel({ review, onChanged }: { review: ReviewDetail; onChanged?: ()
       <h3>Ask about this review</h3>
       <p className="muted small">
         The AI sees this review's findings, the standards involved, active exceptions and how these standards' findings fared in other reviews. It's
-        advisory: it can't accept, reject, challenge or waive anything. Each question uses one call of today's AI budget.
+        advisory: it can't accept, reject, challenge or waive anything. Each question uses one call of today's AI budget; each person can ask 5 a day,
+        and chat stops while the budget is nearly used up so reviews keep some calls.
       </p>
       {messages.length > 0 && (
         <div className="chat">

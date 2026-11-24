@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, type ExceptionView, type User } from "../api.ts";
 
 type Filter = ExceptionView["state"] | "all";
-const FILTERS: Filter[] = ["pending", "active", "expired", "denied", "all"];
+const FILTERS: Filter[] = ["pending", "active", "expired", "denied", "revoked", "all"];
 
 export function ExceptionsPage({ user, onOpenReview }: { user: User; onOpenReview: (id: string) => void }) {
   const [filter, setFilter] = useState<Filter>("pending");
@@ -32,7 +32,8 @@ export function ExceptionsPage({ user, onOpenReview }: { user: User; onOpenRevie
       </div>
       <p className="muted small">
         An approved, unexpired exception is the only thing that waives a violation. Only approvers decide, never on their own request, and every
-        exception expires within 90 days. Request one from a violation in a review.
+        exception expires within 90 days. Approving a pattern that covers every path, or an exception to a blocker standard, needs a note. An
+        approver can revoke an active exception early; findings it already waived stay waived. Request one from a violation in a review.
       </p>
       {error && <div className="error">{error}</div>}
       {list && list.length === 0 && <p className="muted">No {filter === "all" ? "" : `${filter} `}exceptions.</p>}
@@ -45,6 +46,7 @@ export function ExceptionsPage({ user, onOpenReview }: { user: User; onOpenRevie
 
 function ExceptionCard({ e, user, onDecided, onOpenReview }: { e: ExceptionView; user: User; onDecided: () => void; onOpenReview: (id: string) => void }) {
   const [note, setNote] = useState("");
+  const [revokeNote, setRevokeNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const why =
@@ -55,6 +57,19 @@ function ExceptionCard({ e, user, onDecided, onOpenReview }: { e: ExceptionView;
         : user.id === e.requestedBy.id
           ? "You requested this one, so another approver has to decide it."
           : null;
+
+  async function revoke() {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.revokeException(e.id, revokeNote);
+      onDecided();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function decide(decision: "approve" | "deny") {
     setBusy(true);
@@ -98,8 +113,21 @@ function ExceptionCard({ e, user, onDecided, onOpenReview }: { e: ExceptionView;
       </div>
       {e.decidedBy && (
         <div className="small">
-          {e.status === "approved" ? "Approved" : "Denied"} by {e.decidedBy.name} · {e.decidedAt ? new Date(e.decidedAt).toLocaleString() : ""}
+          {e.status === "denied" ? "Denied" : "Approved"} by {e.decidedBy.name} · {e.decidedAt ? new Date(e.decidedAt).toLocaleString() : ""}
           {e.decisionNote ? `: ${e.decisionNote}` : ""}
+        </div>
+      )}
+      {e.revokedBy && (
+        <div className="small">
+          Revoked by {e.revokedBy.name} · {e.revokedAt ? new Date(e.revokedAt).toLocaleString() : ""}: {e.revokeNote}
+        </div>
+      )}
+      {e.state === "active" && user.role === "approver" && (
+        <div className="row">
+          <input className="text-input grow" placeholder="Why revoke it? (required)" value={revokeNote} maxLength={1000} onChange={(x) => setRevokeNote(x.target.value)} />
+          <button className="ghost small-button" disabled={busy || !revokeNote.trim()} onClick={revoke}>
+            Revoke
+          </button>
         </div>
       )}
       {e.status === "pending" && (
@@ -108,7 +136,7 @@ function ExceptionCard({ e, user, onDecided, onOpenReview }: { e: ExceptionView;
             <span className="muted small">{why}</span>
           ) : (
             <>
-              <input className="text-input grow" placeholder="Note (optional)" value={note} maxLength={1000} onChange={(x) => setNote(x.target.value)} />
+              <input className="text-input grow" placeholder="Note (required for a pattern covering every path or a blocker standard)" value={note} maxLength={1000} onChange={(x) => setNote(x.target.value)} />
               <button className="primary small-button" disabled={busy} onClick={() => decide("approve")}>
                 Approve
               </button>

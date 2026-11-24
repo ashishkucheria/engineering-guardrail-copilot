@@ -3,6 +3,8 @@
 -- Exceptions: the only thing that can waive a violation (prompt 3). A request is pending until an
 -- approver other than the requester decides it. "Active" and "expired" aren't stored: an exception
 -- is active only while status = 'approved' AND expires_at > now, so it can't be left stale.
+-- An approver can revoke an approved exception early (review of PR #4); the approval stays on record
+-- and the revocation is recorded alongside it. Past waivers stay; later reviews aren't waived.
 CREATE TABLE exceptions (
   id             TEXT PRIMARY KEY,
   standard_id    TEXT NOT NULL REFERENCES standards(id),
@@ -10,19 +12,26 @@ CREATE TABLE exceptions (
   justification  TEXT NOT NULL CHECK (length(justification) > 0),
   source_finding TEXT REFERENCES findings(id),
   requested_by   TEXT NOT NULL REFERENCES users(id),
-  status         TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'denied')),
+  status         TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'denied', 'revoked')),
   decided_by     TEXT REFERENCES users(id),
   decision_note  TEXT,
   expires_at     TEXT NOT NULL,        -- required; at most 90 days after the request (checked by the API)
   created_at     TEXT NOT NULL,
   decided_at     TEXT,
+  revoked_by     TEXT REFERENCES users(id),
+  revoked_at     TEXT,
+  revoke_note    TEXT,
   CHECK (decided_by IS NULL OR decided_by <> requested_by),  -- no self-approval, even if app code is bypassed
   CHECK ((status = 'pending') = (decided_by IS NULL)),       -- decided exactly when it has a decider
   CHECK ((status = 'pending') = (decided_at IS NULL)),
-  CHECK (expires_at > created_at)
+  CHECK (expires_at > created_at),
+  CHECK ((status = 'revoked') = (revoked_by IS NOT NULL)),
+  CHECK ((status = 'revoked') = (revoked_at IS NOT NULL)),
+  CHECK (status <> 'revoked' OR length(revoke_note) > 0)     -- a revocation always says why
 );
 CREATE INDEX idx_exceptions_standard_status ON exceptions(standard_id, status);
 CREATE INDEX idx_exceptions_source ON exceptions(source_finding);
+CREATE INDEX idx_exceptions_requester ON exceptions(requested_by, status);
 
 -- What happened to a finding, without changing the finding itself. A waiver is set at most once:
 -- by the review's apply-exceptions step, or when an exception requested from the finding is approved.
@@ -41,5 +50,14 @@ CREATE TABLE chat_messages (
   CHECK ((role = 'user') = (user_id IS NOT NULL))
 );
 CREATE INDEX idx_chat_review ON chat_messages(review_id, id);
+
+-- Chat questions per user per UTC day (review of PR #4, item 3). Counted like llm_budget: a
+-- conditional UPDATE that only applies under the cap, so concurrent questions can't overshoot it.
+CREATE TABLE chat_quota (
+  day     TEXT NOT NULL,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  used    INTEGER NOT NULL CHECK (used >= 0),
+  PRIMARY KEY (day, user_id)
+);
 
 CREATE INDEX idx_feedback_action ON feedback(action, finding_id);

@@ -60,7 +60,7 @@ export interface FindingView extends Finding {
   /** Latest accept/reject. Never affects detection or the verdict. */
   disposition: "open" | "accepted" | "rejected";
   /** The exception that waives this finding, if any. Waived findings don't count toward the verdict. */
-  waiver: { id: string; pathPattern: string; decidedBy: Ref | null; expiresAt: string } | null;
+  waiver: { id: string; pathPattern: string; decidedBy: Ref | null; expiresAt: string; revokedAt: string | null } | null;
   /** The latest exception requested from this finding, if any. */
   exceptionRequest: { id: string; status: ExceptionView["status"] } | null;
 }
@@ -95,11 +95,15 @@ export interface ExceptionView {
   justification: string;
   sourceFinding: { id: string; reviewId: string; file: string; lineStart: number } | null;
   requestedBy: Ref;
-  status: "pending" | "approved" | "denied";
+  status: "pending" | "approved" | "denied" | "revoked";
   /** Derived, never stored: approved exceptions are active until expiresAt, then expired. */
-  state: "pending" | "active" | "expired" | "denied";
+  state: "pending" | "active" | "expired" | "denied" | "revoked";
   decidedBy: Ref | null;
   decisionNote: string | null;
+  /** Set when an approver ended an approved exception early. Past waivers stay. */
+  revokedBy: Ref | null;
+  revokedAt: string | null;
+  revokeNote: string | null;
   expiresAt: string;
   createdAt: string;
   decidedAt: string | null;
@@ -118,7 +122,7 @@ export interface DashboardView {
   rejectRateByStandard: { id: string; rate: number; n: number }[];
   /** "disputed" means disputed by the author through a challenge: a signal, not a confirmed false positive. */
   challenges: { upheld: number; disputed: number };
-  exceptions: { pending: number; active: number; expired: number; denied: number };
+  exceptions: { pending: number; active: number; expired: number; denied: number; revoked: number };
   budget: MetaView["budget"];
 }
 

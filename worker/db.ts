@@ -351,7 +351,7 @@ export async function getReview(db: D1Database, id: string): Promise<Omit<Review
     db.prepare("SELECT id, content_hash, enabled, retired_at FROM standards"),
     db
       .prepare(
-        `SELECT f.*, w.path_pattern AS w_pattern, w.expires_at AS w_expires, w.decided_by AS w_by, wu.name AS w_by_name,
+        `SELECT f.*, w.path_pattern AS w_pattern, w.expires_at AS w_expires, w.revoked_at AS w_revoked, w.decided_by AS w_by, wu.name AS w_by_name,
                 (SELECT x.id FROM exceptions x WHERE x.source_finding = f.id ORDER BY x.created_at DESC, x.id LIMIT 1) AS req_id,
                 (SELECT x.status FROM exceptions x WHERE x.source_finding = f.id ORDER BY x.created_at DESC, x.id LIMIT 1) AS req_status
          FROM findings f
@@ -434,6 +434,7 @@ export async function getReview(db: D1Database, id: string): Promise<Omit<Review
             pathPattern: f.w_pattern as string,
             decidedBy: f.w_by ? { id: f.w_by as string, name: (f.w_by_name as string) ?? (f.w_by as string) } : null,
             expiresAt: f.w_expires as string,
+            revokedAt: (f.w_revoked as string | null) ?? null,
           }
         : null,
       exceptionRequest: f.req_id ? { id: f.req_id as string, status: f.req_status as ExceptionView["status"] } : null,
@@ -528,14 +529,19 @@ interface ExceptionRow {
   expires_at: string;
   created_at: string;
   decided_at: string | null;
+  revoked_by: string | null;
+  revoked_by_name: string | null;
+  revoked_at: string | null;
+  revoke_note: string | null;
 }
 
 const EXCEPTION_SELECT = `
-  SELECT e.*, s.title AS standard_title, rq.name AS requested_by_name, dc.name AS decided_by_name,
+  SELECT e.*, s.title AS standard_title, rq.name AS requested_by_name, dc.name AS decided_by_name, rv.name AS revoked_by_name,
          sf.review_id AS sf_review, sf.file AS sf_file, sf.line_start AS sf_line
   FROM exceptions e
   JOIN users rq ON rq.id = e.requested_by
   LEFT JOIN users dc ON dc.id = e.decided_by
+  LEFT JOIN users rv ON rv.id = e.revoked_by
   LEFT JOIN standards s ON s.id = e.standard_id
   LEFT JOIN findings sf ON sf.id = e.source_finding`;
 
@@ -553,23 +559,34 @@ function toException(r: ExceptionRow, now: Date): ExceptionView {
     state,
     decidedBy: r.decided_by ? { id: r.decided_by, name: r.decided_by_name ?? r.decided_by } : null,
     decisionNote: r.decision_note,
+    revokedBy: r.revoked_by ? { id: r.revoked_by, name: r.revoked_by_name ?? r.revoked_by } : null,
+    revokedAt: r.revoked_at,
+    revokeNote: r.revoke_note,
     expiresAt: r.expires_at,
     createdAt: r.created_at,
     decidedAt: r.decided_at,
   };
 }
 
+/**
+ * Insert a pending request, but only while the requester has fewer than `maxPending` unexpired
+ * pending requests. The count and the insert are one statement, so concurrent requests can't get
+ * past the cap. Returns whether the request was inserted.
+ */
 export async function insertException(
   db: D1Database,
   e: { id: string; standardId: string; pathPattern: string; justification: string; sourceFinding: string | null; requestedBy: string; expiresAt: string; createdAt: string },
-): Promise<void> {
-  await db
+  maxPending: number,
+): Promise<boolean> {
+  const r = await db
     .prepare(
       `INSERT INTO exceptions (id, standard_id, path_pattern, justification, source_finding, requested_by, status, expires_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+       SELECT ?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7, ?8
+       WHERE (SELECT COUNT(*) FROM exceptions WHERE requested_by = ?6 AND status = 'pending' AND expires_at > ?8) < ?9`,
     )
-    .bind(e.id, e.standardId, e.pathPattern, e.justification, e.sourceFinding, e.requestedBy, e.expiresAt, e.createdAt)
+    .bind(e.id, e.standardId, e.pathPattern, e.justification, e.sourceFinding, e.requestedBy, e.expiresAt, e.createdAt, maxPending)
     .run();
+  return (r.meta.changes ?? 0) === 1;
 }
 
 export async function getException(db: D1Database, id: string, now: Date): Promise<ExceptionView | null> {
@@ -586,6 +603,7 @@ export async function listExceptions(db: D1Database, state: ExceptionView["state
   const where = {
     pending: "e.status = 'pending'",
     denied: "e.status = 'denied'",
+    revoked: "e.status = 'revoked'",
     active: "e.status = 'approved' AND e.expires_at > ?1",
     expired: "e.status = 'approved' AND e.expires_at <= ?1",
   } as const;
@@ -661,14 +679,39 @@ export async function decideException(
           `INSERT INTO review_events (review_id, step, outcome, duration_ms, detail, at)
            SELECT id, 'exception', 'ok', NULL,
                   'Exception ' || ?1 || ' approved by ' || ?5 || ': ' ||
-                  (SELECT COUNT(*) FROM findings WHERE review_id = ?4 AND waived_by_exception = ?1) || ' finding(s) waived; verdict now ' || verdict,
+                  (SELECT COUNT(*) FROM findings WHERE review_id = ?4 AND waived_by_exception = ?1) || ' finding(s) waived; verdict now ' || verdict ||
+                  COALESCE('. Note: ' || ?6, ''),
                   ?3
            FROM reviews WHERE id = ?4 AND status = 'complete' AND ${madeHere}`,
         )
-        .bind(d.id, d.by.id, d.at, reviewId, d.by.name),
+        .bind(d.id, d.by.id, d.at, reviewId, d.by.name, d.note),
     );
   }
   const [update] = await db.batch(stmts);
+  return (update?.meta.changes ?? 0) === 1;
+}
+
+/**
+ * Revoke an approved, unexpired exception (review of PR #4, item 2). Conditional on it still being
+ * active, so a concurrent revoke or expiry writes nothing. Past waivers stay: findings already
+ * waived keep their waiver, and only later reviews stop being waived. If the request came from a
+ * finding, the source review gets an event. Returns whether this call revoked it.
+ */
+export async function revokeException(db: D1Database, r: { id: string; by: Ref; note: string; at: string }): Promise<boolean> {
+  const madeHere = "EXISTS (SELECT 1 FROM exceptions WHERE id = ?1 AND status = 'revoked' AND revoked_by = ?2 AND revoked_at = ?3)";
+  const [update] = await db.batch([
+    db
+      .prepare("UPDATE exceptions SET status = 'revoked', revoked_by = ?2, revoked_at = ?3, revoke_note = ?4 WHERE id = ?1 AND status = 'approved' AND expires_at > ?3")
+      .bind(r.id, r.by.id, r.at, r.note),
+    db
+      .prepare(
+        `INSERT INTO review_events (review_id, step, outcome, duration_ms, detail, at)
+         SELECT f.review_id, 'exception', 'ok', NULL,
+                'Exception ' || ?1 || ' revoked by ' || ?5 || ': ' || ?4 || '. Findings already waived stay waived.', ?3
+         FROM exceptions x JOIN findings f ON f.id = x.source_finding WHERE x.id = ?1 AND ${madeHere}`,
+      )
+      .bind(r.id, r.by.id, r.at, r.note, r.by.name),
+  ]);
   return (update?.meta.changes ?? 0) === 1;
 }
 
@@ -709,6 +752,15 @@ export async function listChat(db: D1Database, reviewId: string): Promise<ChatMe
   return (await chatSelect(db, reviewId).all<ChatRow>()).results.map(toChatMessage);
 }
 
+/** Count one chat question against the user's daily cap, atomically. Returns false at the cap. */
+export async function reserveChatQuestion(db: D1Database, userId: string, day: string, cap: number): Promise<boolean> {
+  const [, update] = await db.batch([
+    db.prepare("INSERT OR IGNORE INTO chat_quota (day, user_id, used) VALUES (?, ?, 0)").bind(day, userId),
+    db.prepare("UPDATE chat_quota SET used = used + 1 WHERE day = ?1 AND user_id = ?2 AND used + 1 <= ?3").bind(day, userId, cap),
+  ]);
+  return (update?.meta.changes ?? 0) === 1;
+}
+
 /** The question and the answer are stored together, only after the model answered. */
 export async function appendChat(db: D1Database, c: { reviewId: string; userId: string; question: string; reply: string; at: string }): Promise<void> {
   await db.batch([
@@ -730,7 +782,7 @@ export async function dashboard(db: D1Database, now: Date): Promise<Omit<Dashboa
          COALESCE(SUM(classification = 'violation' AND waived_by_exception IS NULL AND severity = 'major'), 0) AS major,
          COALESCE(SUM(classification = 'violation' AND waived_by_exception IS NULL AND severity = 'minor'), 0) AS minor,
          COALESCE(SUM(classification = 'suggestion'), 0) AS suggestions,
-         COALESCE(SUM(waived_by_exception IS NOT NULL), 0) AS waived,
+         COALESCE(SUM(classification = 'violation' AND waived_by_exception IS NOT NULL), 0) AS waived,
          COALESCE(SUM(disposition = 'open'), 0) AS open,
          COALESCE(SUM(disposition = 'accepted'), 0) AS accepted,
          COALESCE(SUM(disposition = 'rejected'), 0) AS rejected,
@@ -740,6 +792,7 @@ export async function dashboard(db: D1Database, now: Date): Promise<Omit<Dashboa
     ),
     db.prepare(
       `SELECT f.standard_id AS id, s.title, COUNT(*) AS count FROM findings f LEFT JOIN standards s ON s.id = f.standard_id
+       WHERE f.classification = 'violation' AND f.waived_by_exception IS NULL
        GROUP BY f.standard_id ORDER BY count DESC, f.standard_id LIMIT 5`,
     ),
     db.prepare(
@@ -751,7 +804,8 @@ export async function dashboard(db: D1Database, now: Date): Promise<Omit<Dashboa
         `SELECT COALESCE(SUM(status = 'pending'), 0) AS pending,
                 COALESCE(SUM(status = 'approved' AND expires_at > ?1), 0) AS active,
                 COALESCE(SUM(status = 'approved' AND expires_at <= ?1), 0) AS expired,
-                COALESCE(SUM(status = 'denied'), 0) AS denied
+                COALESCE(SUM(status = 'denied'), 0) AS denied,
+                COALESCE(SUM(status = 'revoked'), 0) AS revoked
          FROM exceptions`,
       )
       .bind(now.toISOString()),
@@ -770,6 +824,6 @@ export async function dashboard(db: D1Database, now: Date): Promise<Omit<Dashboa
     dispositions: { open: s.open!, accepted: s.accepted!, rejected: s.rejected! },
     rejectRateByStandard: (rates!.results as { id: string; rejected: number; n: number }[]).map((r) => ({ id: r.id, rate: r.rejected / r.n, n: r.n })),
     challenges: { upheld: s.upheld!, disputed: s.disputed! },
-    exceptions: { pending: e.pending!, active: e.active!, expired: e.expired!, denied: e.denied! },
+    exceptions: { pending: e.pending!, active: e.active!, expired: e.expired!, denied: e.denied!, revoked: e.revoked! },
   };
 }

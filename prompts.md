@@ -482,3 +482,97 @@ Who may accept or reject a finding?
 Approving an exception waives the matching findings of the review it came from and recomputes that review's
 verdict. The "ten rejections never suppress a finding" hard gate runs in the smoke test. Where the build differs
 from the design is listed in section 12 of the design doc. The PR waits for review.
+
+---
+
+## 11. Review of PR #4 (3-C)
+
+**Intent:** Have the 3-C review findings fixed: three before merge, plus the smaller points.
+
+My message was the pasted review below; the paste contains the review twice, and it is recorded as sent.
+
+```text
+- Self-approval is blocked in two places. canDecideException (core/policy.ts) and a CHECK (decided_by <> requested_by) in the migration both enforce it. status and decided_by / decided_at are tied together by CHECKs too.
+- Approval is atomic. decideException makes the status update conditional on the exception still being pending. Every later statement (waive findings, recompute verdict, log the event) is guarded by madeHere, so a request that loses a race writes nothing. That is how two simultaneous approvers give exactly one approval.
+- The SQL verdict matches computeVerdict. The order is the same: unwaived blocker, then incomplete, then warn, then pass. json_array_length(coverage,'$.skipped') > 0 is the same test as isComplete. A waiver can't hide a coverage gap, and there is a unit test for that.
+- Rejections can't suppress a finding. Feedback only sets disposition. Detection, applyExceptions and the verdict take no feedback input, and a test checks that. Only an approved, unexpired exception waives anything.
+- Expiry is derived, never stored. Expired exceptions can't go stale, and a pending request that has expired can't be approved (409).
+- The chat prompt is built defensively. It uses a random delimiter tag, treats rejection reasons as "other people's opinions", and has no tools.
+- The eval write-up is honest. The headline numbers match the saved JSON (19 TP, 1 FP, 0 misses, precision 0.95). It discloses one run per config, 25 cases, the dropped size-cap case, and that the history gate lives in the smoke test. The new OBS-001 false positive is reported, not hidden.
+
+Fix before merge
+
+1. The path-glob matcher can hang the Worker. I reproduced this.
+   - globMatch (core/exceptions.ts) turns each * into [^/]* in one regex. A pattern like *a*a*a*a*a*a*a*a*b (18 characters, which passes PATTERN_CHARS) took 2.5 s against a 40-character path. At 10 or more stars my probe timed out after 100 s.
+   - Any user can trigger it, with no approval. POST /api/exceptions with a finding_id calls globMatch(pattern, source.file) before saving anything. The attacker chooses both the pattern and the file name, because the file name comes from their own diff.
+   - If an approver approves such a pattern, it runs in every review's apply-exceptions step and in the decision route, so every later review would hang.
+   - Fix: collapse repeated *, cap the number of wildcards (say 3), or use a linear-time matcher with two pointers. Add a unit test with this pattern.
+2. An approved exception can't be revoked. canDecideException only allows decisions on pending requests, and there is no revoke route.
+   - One wrong approval, such as * on SEC-001 for 90 days, waives every new review until it expires. The only way out is editing D1 by hand.
+   - Fix: add an approver-only revoke that sets the exception to revoked or expires it now, with an audit entry. Per your §12 #4, it wouldn't un-waive past reviews.
+   - Decision for you: should a * pattern, or a blocker standard like SEC-001, be waivable at all? Today an approver can do both. The cheap guard is to require a decision note for broad patterns.
+3. Anyone can use up the AI budget through chat. This is the same class of problem as the 3-B challenge-ownership finding.
+   - POST /api/reviews/:id/chat only calls requireUser. It checks neither the review author nor the role, and has no per-user cap. Each question takes one call from the shared 20 a day.
+   - The IP rate limit is the only guard, at 10 a minute. Calls fall to 429s at 10 a minute, so one person could use up the day in about 2 minutes. After that, every review is rules-only and the author's one challenge gets a 429.
+   - Fix: limit chat to the review's author and approvers, as feedback is. Add a per-user daily chat cap, and keep a few calls back for reviews and challenges.
+
+Smaller points
+
+- The chat prompt has no size cap. It includes every finding's evidence and explanation, up to 200 findings. A big review could go past the model's context window. I think Llama 3.3 on Workers AI is around 24k tokens, but I haven't confirmed that. The call would fail with a 502 after its budget slot was spent. Cap the findings sent (worst severity first) and say so in the prompt.
+- DAILY_LLM_CALLS_APP=60 in .dev.vars.example is a footgun. Someone who copies the file and switches to workers-ai without reading the README could try 60 real calls a day, which is well past the free allocation. Safer: have budgetLimit ignore a value above 20 unless LLM_MODE=fake.
+- Dashboard counts. waived counts waived suggestions too, because an approval marks every matching finding. topStandards includes waived findings and suggestions. The page reads the whole findings table on every load. All fine for a demo, but label the numbers or filter them.
+- No cap on pending exception requests per user. Someone can fill the approvers' queue. The IP limit (60 a minute) is the only guard.
+- Rejection reasons written by one author reach other users' chats. They show up for any review with the same standard. The prompt handles this reasonably, since reasons are labelled as opinions inside a tagged block and chat has no tools. The worst outcome is misleading advice, so I'd accept it and note it.
+- The eval JSON still doesn't record the exact model id, seed or commit. The description string only has "Llama 3.3 70B, prompt v3". I asked for this in the 3-B review. It's small and cheap to add.
+- The OBS-001 false positive is the same kind of failure I flagged in 3-B. Verification proves the quote exists, not that it's a violation, and { hasAuth } passed. It's a warning, not a blocker, so it doesn't stop a change, and you've documented it. I'd keep it on the list for later- Self-approval is blocked in two places. canDecideException (core/policy.ts) and a CHECK (decided_by <> requested_by) in the migration both enforce it. status and decided_by / decided_at are tied together by CHECKs too.
+- Approval is atomic. decideException makes the status update conditional on the exception still being pending. Every later statement (waive findings, recompute verdict, log the event) is guarded by madeHere, so a request that loses a race writes nothing. That is how two simultaneous approvers give exactly one approval.
+- The SQL verdict matches computeVerdict. The order is the same: unwaived blocker, then incomplete, then warn, then pass. json_array_length(coverage,'$.skipped') > 0 is the same test as isComplete. A waiver can't hide a coverage gap, and there is a unit test for that.
+- Rejections can't suppress a finding. Feedback only sets disposition. Detection, applyExceptions and the verdict take no feedback input, and a test checks that. Only an approved, unexpired exception waives anything.
+- Expiry is derived, never stored. Expired exceptions can't go stale, and a pending request that has expired can't be approved (409).
+- The chat prompt is built defensively. It uses a random delimiter tag, treats rejection reasons as "other people's opinions", and has no tools.
+- The eval write-up is honest. The headline numbers match the saved JSON (19 TP, 1 FP, 0 misses, precision 0.95). It discloses one run per config, 25 cases, the dropped size-cap case, and that the history gate lives in the smoke test. The new OBS-001 false positive is reported, not hidden.
+
+Fix before merge
+
+1. The path-glob matcher can hang the Worker. I reproduced this.
+   - globMatch (core/exceptions.ts) turns each * into [^/]* in one regex. A pattern like *a*a*a*a*a*a*a*a*b (18 characters, which passes PATTERN_CHARS) took 2.5 s against a 40-character path. At 10 or more stars my probe timed out after 100 s.
+   - Any user can trigger it, with no approval. POST /api/exceptions with a finding_id calls globMatch(pattern, source.file) before saving anything. The attacker chooses both the pattern and the file name, because the file name comes from their own diff.
+   - If an approver approves such a pattern, it runs in every review's apply-exceptions step and in the decision route, so every later review would hang.
+   - Fix: collapse repeated *, cap the number of wildcards (say 3), or use a linear-time matcher with two pointers. Add a unit test with this pattern.
+2. An approved exception can't be revoked. canDecideException only allows decisions on pending requests, and there is no revoke route.
+   - One wrong approval, such as * on SEC-001 for 90 days, waives every new review until it expires. The only way out is editing D1 by hand.
+   - Fix: add an approver-only revoke that sets the exception to revoked or expires it now, with an audit entry. Per your §12 #4, it wouldn't un-waive past reviews.
+   - Decision for you: should a * pattern, or a blocker standard like SEC-001, be waivable at all? Today an approver can do both. The cheap guard is to require a decision note for broad patterns.
+3. Anyone can use up the AI budget through chat. This is the same class of problem as the 3-B challenge-ownership finding.
+   - POST /api/reviews/:id/chat only calls requireUser. It checks neither the review author nor the role, and has no per-user cap. Each question takes one call from the shared 20 a day.
+   - The IP rate limit is the only guard, at 10 a minute. Calls fall to 429s at 10 a minute, so one person could use up the day in about 2 minutes. After that, every review is rules-only and the author's one challenge gets a 429.
+   - Fix: limit chat to the review's author and approvers, as feedback is. Add a per-user daily chat cap, and keep a few calls back for reviews and challenges.
+
+Smaller points
+
+- The chat prompt has no size cap. It includes every finding's evidence and explanation, up to 200 findings. A big review could go past the model's context window. I think Llama 3.3 on Workers AI is around 24k tokens, but I haven't confirmed that. The call would fail with a 502 after its budget slot was spent. Cap the findings sent (worst severity first) and say so in the prompt.
+- DAILY_LLM_CALLS_APP=60 in .dev.vars.example is a footgun. Someone who copies the file and switches to workers-ai without reading the README could try 60 real calls a day, which is well past the free allocation. Safer: have budgetLimit ignore a value above 20 unless LLM_MODE=fake.
+- Dashboard counts. waived counts waived suggestions too, because an approval marks every matching finding. topStandards includes waived findings and suggestions. The page reads the whole findings table on every load. All fine for a demo, but label the numbers or filter them.
+- No cap on pending exception requests per user. Someone can fill the approvers' queue. The IP limit (60 a minute) is the only guard.
+- Rejection reasons written by one author reach other users' chats. They show up for any review with the same standard. The prompt handles this reasonably, since reasons are labelled as opinions inside a tagged block and chat has no tools. The worst outcome is misleading advice, so I'd accept it and note it.
+- The eval JSON still doesn't record the exact model id, seed or commit. The description string only has "Llama 3.3 70B, prompt v3". I asked for this in the 3-B review. It's small and cheap to add.
+- The OBS-001 false positive is the same kind of failure I flagged in 3-B. Verification proves the quote exists, not that it's a violation, and { hasAuth } passed. It's a warning, not a blocker, so it doesn't stop a change, and you've documented it. I'd keep it on the list for later
+```
+
+The assistant asked one question (the review's "decision for you"). I picked:
+
+```text
+Review of PR #4 asks: should broad exceptions be allowed? Today an approver can approve a pattern of "*" (every path) and can waive a blocker standard such as SEC-001. Which guard do you want?
+→ Note for broad or blocker (Recommended)
+```
+
+**Outcome:** Fixed on the PR #4 branch, not merged:
+- Glob matching no longer uses a regex; it runs in linear time, with a unit test using the reviewer's pattern and a smoke check through the API.
+- Approvers can revoke an active exception with a note; past waivers stay. Approving a pattern that covers every path, or a blocker standard, needs a note.
+- At most 5 pending requests per person.
+- Chat is limited to the author or an approver, 5 questions per person per day, and stops 5 calls before the budget runs out. The prompt sends at most 40 findings, worst first.
+- Real models never get more than 20 app calls a day, whatever `.dev.vars` says.
+- Dashboard counts violations only for "waived" and the top standards; it adds a revoked count.
+- Saved eval results record the commit, prompt version, model id and seed.
+- Docs note that rejection reasons reach other users' chats (accepted), and the OBS-001 false positive as a follow-up.
+- 152 unit tests and 42 of 42 smoke checks pass.
