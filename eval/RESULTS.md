@@ -44,7 +44,7 @@ recall row above puts both on the same 19 expected findings.
 
 ### What it costs
 
-- **One false positive.** In `obs-001-logs-redacted-clean` (added in this PR), the code logs `{ hasAuth }`, a
+- **One false positive.** In `obs-001-logs-redacted-clean` (added in PR #4), the code logs `{ hasAuth }`, a
   boolean saying whether an Authorization header is present. The model reported it as logging a secret. OBS-001
   is a major, not a blocker, so this gives a warning, not a failed change.
 - **Model calls.** About 25 a run, which is most of a day's Workers AI free allocation.

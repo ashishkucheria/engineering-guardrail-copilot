@@ -1,8 +1,12 @@
 # Prompt history
 
-This file is the prompt history the assignment asks for. Every prompt I gave the AI coding assistant (Claude Code,
-model Claude Opus 5.5) is quoted **verbatim, typos included**, in the order I gave it. Under each prompt is a short
-note on what it was meant to do and what came out of it. Nothing here is reconstructed or invented.
+This project was built with an AI coding assistant (Claude Code, model Claude Opus 5.5). I started it for a job
+application that asked for the full prompt history; I later stopped that application and kept the project, and this
+log, as a record of how the work was directed.
+
+Every prompt I gave the assistant up to the PR #4 review fixes (prompt 11) is quoted **verbatim, typos included**, in the order I gave
+it. Under each prompt is a short note on what it was meant to do and what came out of it. Nothing here is
+reconstructed or invented. The log stops there; later work is described in the pull requests.
 
 ---
 
