@@ -1,1 +1,4 @@
 * text=auto eol=lf
+
+# The Action's bundle is generated: keep it out of diffs. (eol=lf above keeps it byte-identical to CI's rebuild.)
+dist/action/** linguist-generated=true -diff

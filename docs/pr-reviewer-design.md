@@ -70,7 +70,8 @@ No `actions/checkout` is needed: the Action reads the diff and the standards thr
 | `check-run` | `true` | Create the check run with annotations |
 | `summary-comment` | `true` | Keep one summary comment up to date |
 | `inline-comments` | `false` | Comment on each violation's line |
-| `max-ai-calls` | `20` | Upper bound on model calls per run, retries included |
+| `max-ai-calls` | `20` | Upper bound on provider requests per run, retries and step-downs included |
+| `max-files` | `50` | Files reviewed per pull request; the rest are listed as not reviewed |
 | `github-token` | `${{ github.token }}` | Token for reading the PR and writing results |
 
 Outputs: `verdict`, `violations`, `blockers`, `incomplete`, for later steps.
@@ -162,14 +163,24 @@ Everything posted is redacted the same way as in the app: the comment is public 
 | `major` | `failure` if there is any blocker or major violation |
 
 `incomplete` gives `neutral`, or `failure` with `fail-on-incomplete: true`. An exception-waived finding never
-fails the check. The job's own exit code follows the conclusion, so a required status works either way.
+fails the check. With `blocker` or `major`, a run that doesn't fail but has violations is `neutral`, as with
+`none`. The job's own exit code follows the conclusion, so a required status works either way.
 
 ## 8. Security and privacy
 
 - **Fork PRs.** On `pull_request` from a fork, GitHub doesn't pass secrets and the token is read-only. The Action
-  then runs **rules only**, writes the result to the job summary (it can't comment), and says why. The docs warn
+  then runs **rules only**, writes the result to the job summary (it can't comment), and says why. The verdict is
+  `incomplete`, because the AI standards weren't checked. The same fallback applies when `api-key` is empty for
+  another reason (a Dependabot run), except that the Action still writes the check and comment. The docs warn
   against `pull_request_target` with the PR head checked out; the Action never checks out or runs PR code, so it
-  is safe under `pull_request_target`, but that choice stays with the repository owner.
+  is safe under `pull_request_target`, but that choice stays with the repository owner. Under
+  `pull_request_target` the secrets and a write token exist, so a fork PR is reviewed in full.
+- **`provider: none` is a choice, not a gap.** The verdict isn't `incomplete` because of it; the summary lists the
+  standards that need AI and weren't checked.
+- **Escaping.** The model's text goes into comments only after it is flattened to one line, with HTML tags, links,
+  table pipes and backticks neutralised and `@` mentions broken, since a PR comment is public and renders them.
+- **The summary comment is found by its marker among the Action's own comments only** (author type `Bot`), so a
+  person's comment containing the marker is never edited.
 - **Standards from the base commit** (§4 step 2), so a PR can't weaken the rules it is checked against.
 - **Prompt injection.** Same protections as the app: code as data between random per-request tags, a JSON
   schema, evidence verification, and code deciding the verdict. The model can't post anything itself; the Action
@@ -181,17 +192,25 @@ fails the check. The job's own exit code follows the conclusion, so a required s
 ## 9. Code layout
 
 ```
-action.yml                  inputs, outputs, runs: node24 (version checked at build time), main: dist/action/index.js
-action/main.ts              entry point: read inputs, run the flow, set outputs
-action/github.ts            PR files, contents at a ref, check runs, comments (fetch, no Octokit dependency if practical)
-action/publish.ts           check run, summary comment, inline comments (pure formatting, unit-tested)
+action.yml                  inputs, outputs, runs: node24, main: dist/action/index.cjs
+action/main.ts              entry point: read inputs and the event, run the flow, set outputs and the exit code
+action/run.ts               the flow (§4) and the writes; everything outside it is passed in, so tests run it end to end
+action/runner.ts            the runner protocol by hand: INPUT_* variables, GITHUB_OUTPUT, ::add-mask::, job summary
+action/github.ts            PR files, contents at a ref, check runs, comments, over fetch (no Octokit)
+action/standards.ts         standards from the repository at the base commit, or the built-in set
+action/publish.ts           gating, annotations, summary Markdown, escaping (pure, unit-tested)
 action/providers/*.ts       openai-compatible, anthropic, gemini, workers-ai
-core/                       unchanged except: standards loading from YAML text, and per-file limits for the Action
-dist/action/index.js        bundled output, committed (Actions run it straight from the tag)
+core/                       unchanged except: standards from YAML text, per-file limits, generated-file skipping
+dist/action/index.cjs       bundled by esbuild (npm run build:action), committed (Actions run it straight from the tag)
 ```
 
 The web app keeps its Workers AI binding client in `worker/ai.ts`; the REST client for the Action is separate.
-CI rebuilds the bundle and fails if `dist/action/` is out of date.
+CI rebuilds the bundle and fails if `dist/action/` is out of date. The built-in standards are compiled into the
+bundle from `standards/`, so the Action needs no files next to it. The bundle is about 1.6 MB, three quarters of it
+the Anthropic SDK; replacing it with a plain `fetch` adapter would make the bundle roughly a quarter of the size.
+
+The Actions toolkit isn't used: the little of the runner protocol the Action needs is in `runner.ts`, so the bundle
+holds only code that runs. The key and the token are masked with `::add-mask::` before anything else happens.
 
 ## 10. Testing
 
@@ -200,8 +219,9 @@ CI rebuilds the bundle and fails if `dist/action/` is out of date.
   fingerprint logic; standards from the base ref versus the head.
 - **Dogfood:** this repository runs the Action on its own PRs from the local path (`uses: ./`), first with
   `provider: none` so CI needs no key, then with a fake provider for the full publish path.
-- **Real providers:** one manual run per provider against a test PR with known findings, recorded in the PR that
-  adds it. Not run in CI (keys and cost).
+- **Real providers:** `npm run try:provider -- <provider>` reviews a small diff with known problems using a key from
+  the environment and prints the verdict, the findings and the request count. Run once per provider by whoever has
+  the key, and recorded in the PR. Not run in CI (keys and cost).
 
 ## 11. Delivery
 

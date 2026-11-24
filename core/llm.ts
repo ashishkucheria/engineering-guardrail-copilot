@@ -219,6 +219,8 @@ export interface LlmDetectorOptions extends DetectOptions {
    * no call is made, and this chunk and every later one become coverage gaps.
    */
   reserve?: () => Promise<boolean>;
+  /** Coverage reason when `reserve` refuses. Default BUDGET_REASON (the app's daily budget). */
+  budgetReason?: string;
   onChunk?: (label: string, outcome: "ok" | "failed" | "skipped", detail: string) => void;
   /**
    * Files the model isn't asked about (the Action leaves out lock files and generated output).
@@ -260,8 +262,8 @@ export function llmDetector(client: LlmClient, opts: LlmDetectorOptions = {}): D
         }
         if (done) continue;
         if (budgetOut) {
-          skipped.push({ file: label, reason: BUDGET_REASON });
-          opts.onChunk?.(label, "skipped", BUDGET_REASON);
+          skipped.push({ file: label, reason: opts.budgetReason ?? BUDGET_REASON });
+          opts.onChunk?.(label, "skipped", opts.budgetReason ?? BUDGET_REASON);
         } else {
           skipped.push({ file: label, reason: `AI review failed: ${lastError}` });
           opts.onChunk?.(label, "failed", lastError);

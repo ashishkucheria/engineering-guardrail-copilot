@@ -30,6 +30,10 @@ jobs:
         run: npm run eval -- --config rules --strict
       - name: Build
         run: npm run build
+      - name: Action bundle (dist/action) is up to date
+        run: |
+          npm run build:action
+          git diff --exit-code -- dist/action || { echo "::error::dist/action is stale. Run npm run build:action and commit the result."; exit 1; }
       - name: API smoke test against a local server (fake model, no Cloudflare account, no AI calls)
         run: |
           printf 'LLM_MODE=fake\nDAILY_LLM_CALLS_APP=60\n' > .dev.vars
