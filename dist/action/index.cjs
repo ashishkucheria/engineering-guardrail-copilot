@@ -38279,6 +38279,127 @@ var import_node_fs2 = require("node:fs");
 // action/github.ts
 init_define_BUILTIN_STANDARDS();
 
+// core/diff.ts
+init_define_BUILTIN_STANDARDS();
+var MAX_INPUT_BYTES = 1e5;
+var MAX_FILES = 20;
+var SNIPPET_PATH = "snippet";
+var HUNK = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
+function looksLikeDiff(input) {
+  return /^diff --git /m.test(input) || /^--- /m.test(input) && /^\+\+\+ /m.test(input) || /^@@ -\d+/m.test(input);
+}
+function isTestPath(path4) {
+  return /(^|\/)(__tests__|tests?|spec)\//i.test(path4) || /\.(test|spec)\.[cm]?[jt]sx?$/i.test(path4) || /_test\.(go|py)$/i.test(path4) || /(^|\/)test_[^/]+\.py$/i.test(path4);
+}
+var CODE_EXT = /\.(ts|tsx|js|jsx|mjs|cjs|py|go|java|kt|rb|rs|cs|php|swift|scala)$/i;
+function isCodePath(path4) {
+  return CODE_EXT.test(path4);
+}
+function isGeneratedPath(path4) {
+  return /(^|\/)(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?|Cargo\.lock|poetry\.lock|uv\.lock|Pipfile\.lock|composer\.lock|Gemfile\.lock|go\.sum)$/.test(path4) || /\.min\.(js|css)$/i.test(path4) || /\.map$/i.test(path4) || /(^|\/)(dist|build|vendor|node_modules)\//.test(path4);
+}
+function parseInput(input, limits = {}) {
+  const maxFiles = limits.maxFiles ?? MAX_FILES;
+  const text = input.replace(/\r\n?/g, "\n");
+  if (!looksLikeDiff(text)) {
+    const lines = text.split("\n").map((t, i) => ({ n: i + 1, text: t, added: true }));
+    while (lines.length && lines[lines.length - 1].text === "") lines.pop();
+    return {
+      kind: "snippet",
+      files: [{ path: SNIPPET_PATH, lines, isTest: false }],
+      coverage: { filesTotal: 1, filesReviewed: 1, skipped: [] }
+    };
+  }
+  const raw = splitDiffFiles(text);
+  const coverage = { filesTotal: 0, filesReviewed: 0, skipped: [] };
+  const files = [];
+  for (const f of raw) {
+    if (f.deleted) continue;
+    coverage.filesTotal++;
+    if (f.binary) {
+      coverage.skipped.push({ file: f.path, reason: "binary file" });
+      continue;
+    }
+    if (files.length >= maxFiles) {
+      coverage.skipped.push({ file: f.path, reason: `over the ${maxFiles}-file limit` });
+      continue;
+    }
+    if (limits.maxFileBytes !== void 0 && !isGeneratedPath(f.path) && fileBytes(f.lines) > limits.maxFileBytes) {
+      coverage.skipped.push({ file: f.path, reason: `over the ${Math.round(limits.maxFileBytes / 1e3)} KB per-file limit` });
+      continue;
+    }
+    files.push({ path: f.path, lines: f.lines, isTest: isTestPath(f.path) });
+    coverage.filesReviewed++;
+  }
+  return { kind: "diff", files, coverage };
+}
+function splitDiffFiles(text) {
+  const out = [];
+  let cur = null;
+  let newLine = 0;
+  let inHunk = false;
+  const start = (path4) => {
+    cur = { path: path4, lines: [], deleted: false, binary: false };
+    out.push(cur);
+    inHunk = false;
+  };
+  const all = text.split("\n");
+  if (all[all.length - 1] === "") all.pop();
+  let headerOpen = false;
+  for (let i = 0; i < all.length; i++) {
+    const line = all[i];
+    const git = /^diff --git a\/(.+?) b\/(.+)$/.exec(line);
+    if (git) {
+      start(git[2]);
+      headerOpen = true;
+      continue;
+    }
+    if (line.startsWith("--- ") && all[i + 1]?.startsWith("+++ ")) {
+      const target = all[i + 1].slice(4).trim();
+      if (!headerOpen) start(stripPrefix(target === "/dev/null" ? line.slice(4) : target));
+      headerOpen = false;
+      inHunk = false;
+      if (target === "/dev/null") cur.deleted = true;
+      else cur.path = stripPrefix(target);
+      i++;
+      continue;
+    }
+    if (!cur) {
+      if (HUNK.test(line)) start(SNIPPET_PATH);
+      else continue;
+    }
+    const c = cur;
+    if (/^Binary files .* differ$/.test(line) || line.startsWith("GIT binary patch")) {
+      c.binary = true;
+      continue;
+    }
+    if (line.startsWith("deleted file mode")) {
+      c.deleted = true;
+      continue;
+    }
+    const hunk = HUNK.exec(line);
+    if (hunk) {
+      newLine = Number(hunk[1]);
+      inHunk = true;
+      continue;
+    }
+    if (!inHunk) continue;
+    if (line.startsWith("+")) c.lines.push({ n: newLine++, text: line.slice(1), added: true });
+    else if (line.startsWith(" ")) c.lines.push({ n: newLine++, text: line.slice(1), added: false });
+    else if (line === "") c.lines.push({ n: newLine++, text: "", added: false });
+    else if (line.startsWith("-") || line.startsWith("\\")) continue;
+    else inHunk = false;
+  }
+  return out;
+}
+function fileBytes(lines) {
+  const enc = new TextEncoder();
+  return lines.reduce((n, l) => n + enc.encode(l.text).byteLength + 1, 0);
+}
+function stripPrefix(p) {
+  return p.trim().replace(/^[ab]\//, "").split("	")[0];
+}
+
 // action/providers/http.ts
 init_define_BUILTIN_STANDARDS();
 var DEFAULT_TIMEOUT_MS = 12e4;
@@ -38463,6 +38584,8 @@ function assembleDiff(files) {
     if (f.patch) {
       parts.push([...header, f.patch.endsWith("\n") ? f.patch.slice(0, -1) : f.patch].join("\n"));
     } else if (f.status === "renamed" || f.status === "copied" || f.status === "unchanged") {
+      continue;
+    } else if (isGeneratedPath(f.filename)) {
       continue;
     } else if (f.changes > 0) {
       gaps.push({ file: f.filename, reason: "diff too large for GitHub to return" });
@@ -38755,127 +38878,6 @@ function buildDetectionMessages(chunk2, standards) {
 
 // core/rules.ts
 init_define_BUILTIN_STANDARDS();
-
-// core/diff.ts
-init_define_BUILTIN_STANDARDS();
-var MAX_INPUT_BYTES = 1e5;
-var MAX_FILES = 20;
-var SNIPPET_PATH = "snippet";
-var HUNK = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
-function looksLikeDiff(input) {
-  return /^diff --git /m.test(input) || /^--- /m.test(input) && /^\+\+\+ /m.test(input) || /^@@ -\d+/m.test(input);
-}
-function isTestPath(path4) {
-  return /(^|\/)(__tests__|tests?|spec)\//i.test(path4) || /\.(test|spec)\.[cm]?[jt]sx?$/i.test(path4) || /_test\.(go|py)$/i.test(path4) || /(^|\/)test_[^/]+\.py$/i.test(path4);
-}
-var CODE_EXT = /\.(ts|tsx|js|jsx|mjs|cjs|py|go|java|kt|rb|rs|cs|php|swift|scala)$/i;
-function isCodePath(path4) {
-  return CODE_EXT.test(path4);
-}
-function isGeneratedPath(path4) {
-  return /(^|\/)(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?|Cargo\.lock|poetry\.lock|uv\.lock|Pipfile\.lock|composer\.lock|Gemfile\.lock|go\.sum)$/.test(path4) || /\.min\.(js|css)$/i.test(path4) || /\.map$/i.test(path4) || /(^|\/)(dist|build|vendor|node_modules)\//.test(path4);
-}
-function parseInput(input, limits = {}) {
-  const maxFiles = limits.maxFiles ?? MAX_FILES;
-  const text = input.replace(/\r\n?/g, "\n");
-  if (!looksLikeDiff(text)) {
-    const lines = text.split("\n").map((t, i) => ({ n: i + 1, text: t, added: true }));
-    while (lines.length && lines[lines.length - 1].text === "") lines.pop();
-    return {
-      kind: "snippet",
-      files: [{ path: SNIPPET_PATH, lines, isTest: false }],
-      coverage: { filesTotal: 1, filesReviewed: 1, skipped: [] }
-    };
-  }
-  const raw = splitDiffFiles(text);
-  const coverage = { filesTotal: 0, filesReviewed: 0, skipped: [] };
-  const files = [];
-  for (const f of raw) {
-    if (f.deleted) continue;
-    coverage.filesTotal++;
-    if (f.binary) {
-      coverage.skipped.push({ file: f.path, reason: "binary file" });
-      continue;
-    }
-    if (files.length >= maxFiles) {
-      coverage.skipped.push({ file: f.path, reason: `over the ${maxFiles}-file limit` });
-      continue;
-    }
-    if (limits.maxFileBytes !== void 0 && !isGeneratedPath(f.path) && fileBytes(f.lines) > limits.maxFileBytes) {
-      coverage.skipped.push({ file: f.path, reason: `over the ${Math.round(limits.maxFileBytes / 1e3)} KB per-file limit` });
-      continue;
-    }
-    files.push({ path: f.path, lines: f.lines, isTest: isTestPath(f.path) });
-    coverage.filesReviewed++;
-  }
-  return { kind: "diff", files, coverage };
-}
-function splitDiffFiles(text) {
-  const out = [];
-  let cur = null;
-  let newLine = 0;
-  let inHunk = false;
-  const start = (path4) => {
-    cur = { path: path4, lines: [], deleted: false, binary: false };
-    out.push(cur);
-    inHunk = false;
-  };
-  const all = text.split("\n");
-  if (all[all.length - 1] === "") all.pop();
-  let headerOpen = false;
-  for (let i = 0; i < all.length; i++) {
-    const line = all[i];
-    const git = /^diff --git a\/(.+?) b\/(.+)$/.exec(line);
-    if (git) {
-      start(git[2]);
-      headerOpen = true;
-      continue;
-    }
-    if (line.startsWith("--- ") && all[i + 1]?.startsWith("+++ ")) {
-      const target = all[i + 1].slice(4).trim();
-      if (!headerOpen) start(stripPrefix(target === "/dev/null" ? line.slice(4) : target));
-      headerOpen = false;
-      inHunk = false;
-      if (target === "/dev/null") cur.deleted = true;
-      else cur.path = stripPrefix(target);
-      i++;
-      continue;
-    }
-    if (!cur) {
-      if (HUNK.test(line)) start(SNIPPET_PATH);
-      else continue;
-    }
-    const c = cur;
-    if (/^Binary files .* differ$/.test(line) || line.startsWith("GIT binary patch")) {
-      c.binary = true;
-      continue;
-    }
-    if (line.startsWith("deleted file mode")) {
-      c.deleted = true;
-      continue;
-    }
-    const hunk = HUNK.exec(line);
-    if (hunk) {
-      newLine = Number(hunk[1]);
-      inHunk = true;
-      continue;
-    }
-    if (!inHunk) continue;
-    if (line.startsWith("+")) c.lines.push({ n: newLine++, text: line.slice(1), added: true });
-    else if (line.startsWith(" ")) c.lines.push({ n: newLine++, text: line.slice(1), added: false });
-    else if (line === "") c.lines.push({ n: newLine++, text: "", added: false });
-    else if (line.startsWith("-") || line.startsWith("\\")) continue;
-    else inHunk = false;
-  }
-  return out;
-}
-function fileBytes(lines) {
-  const enc = new TextEncoder();
-  return lines.reduce((n, l) => n + enc.encode(l.text).byteLength + 1, 0);
-}
-function stripPrefix(p) {
-  return p.trim().replace(/^[ab]\//, "").split("	")[0];
-}
 
 // core/standards.ts
 init_define_BUILTIN_STANDARDS();

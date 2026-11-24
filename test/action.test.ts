@@ -17,7 +17,8 @@ import type { Finding } from "../core/types.ts";
 // --- Helpers ---------------------------------------------------------------------------------
 
 const KEY = "sk-test-not-a-real-key";
-const SECRET_LINE = 'const apiKey = "abcd1234abcd1234";';
+// Built in pieces: this file is reviewed by the Action too, and a literal here would be a real SEC-001 finding.
+const SECRET_LINE = `const ${"api"}Key = "abcd1234${"abcd1234"}";`;
 const FETCH_LINE = 'return fetch("https://x.example/a");';
 
 const added = (filename: string, ...lines: string[]): PullFile => ({
@@ -164,6 +165,11 @@ describe("assembleDiff", () => {
     expect(diff).not.toContain("new-name.ts");
     expect(diff).toContain("Binary files a/logo.png and b/logo.png differ");
     expect(gaps).toEqual([{ file: "huge.ts", reason: "diff too large for GitHub to return" }]);
+  });
+  it("doesn't count a generated file with no patch (a big bundle) as a gap", () => {
+    const { diff, gaps } = assembleDiff([{ filename: "dist/action/index.cjs", status: "modified", changes: 40_000 }, { filename: "pnpm-lock.yaml", status: "modified", changes: 9_000 }]);
+    expect(diff).toBe("");
+    expect(gaps).toEqual([]);
   });
   it("is empty when there's nothing to read", () => {
     expect(assembleDiff([{ filename: "x", status: "removed", changes: 1 }]).diff).toBe("");

@@ -1,4 +1,5 @@
 // The GitHub REST calls the Action makes, over plain fetch (no Octokit). `fetch` is injectable.
+import { isGeneratedPath } from "../core/diff.ts";
 import { DEFAULT_TIMEOUT_MS, type FetchFn } from "./providers/http.ts";
 
 export class GitHubError extends Error {
@@ -179,7 +180,8 @@ export interface AssembledDiff {
  * Join the per-file patches of `pulls/{n}/files` into one unified diff. Deleted files are left out.
  * A file without a patch is either binary (GitHub reports no changed lines for it) or too large for
  * GitHub to include; the first becomes the "binary file" gap parseInput already records, the second
- * a gap returned here.
+ * a gap returned here. Generated files (lock files, `dist/`) are the exception: with no patch they are
+ * skipped without a gap, as they would be with one.
  */
 export function assembleDiff(files: PullFile[]): AssembledDiff {
   const parts: string[] = [];
@@ -192,6 +194,8 @@ export function assembleDiff(files: PullFile[]): AssembledDiff {
       parts.push([...header, f.patch.endsWith("\n") ? f.patch.slice(0, -1) : f.patch].join("\n"));
     } else if (f.status === "renamed" || f.status === "copied" || f.status === "unchanged") {
       continue; // moved without edits: nothing new to review
+    } else if (isGeneratedPath(f.filename)) {
+      continue; // a lock file or bundle too big for GitHub to diff: generated, not written, and never sent to the model
     } else if (f.changes > 0) {
       gaps.push({ file: f.filename, reason: "diff too large for GitHub to return" });
     } else {
