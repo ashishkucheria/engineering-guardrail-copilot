@@ -177,7 +177,7 @@ export async function reviewPullRequest(pr: PrContext, inputs: Inputs, deps: Dep
     if (inputs.summaryComment) await attempt(deps, "summary comment", () => upsertSummaryComment(gh, pr.number, markdown));
     if (inputs.inlineComments && parsed) {
       const input = parsed;
-      await attempt(deps, "inline comments", async () => deps.info(await syncInlineComments(gh, pr, findings, input)));
+      await attempt(deps, "inline comments", async () => deps.info(await syncInlineComments(gh, pr, findings, input, coverage.skipped.length === 0)));
     }
   }
 
@@ -211,10 +211,14 @@ function waivedFindings(findings: Finding[], exceptions: LoadedExceptions): Waiv
 /**
  * Inline comments (design §6): one review with a comment per new violation on its line, and the
  * Action's earlier comments kept in step. A comment is matched by the fingerprint it carries, so a
- * re-run posts nothing twice; one whose finding is gone is edited to say so (GitHub has no API to
- * mark a comment outdated), and put back if the finding returns. People's comments are never touched.
+ * re-run posts nothing twice; one whose finding isn't reported any more is edited to say so (GitHub
+ * has no API to mark a comment outdated), and put back if the finding returns. People's comments are
+ * never touched.
+ *
+ * A finding missing from a run that couldn't check everything (`complete` false: the AI failed, or
+ * max-ai-calls was reached) isn't known to be gone, so no comment is marked then.
  */
-export async function syncInlineComments(gh: Pick<GitHubClient, "listReviewComments" | "createReview" | "updateReviewComment">, pr: PrContext, findings: Finding[], input: ParsedInput): Promise<string> {
+export async function syncInlineComments(gh: Pick<GitHubClient, "listReviewComments" | "createReview" | "updateReviewComment">, pr: PrContext, findings: Finding[], input: ParsedInput, complete = true): Promise<string> {
   const commentable = new Map(input.files.map((f) => [f.path, new Set(f.lines.map((l) => l.n))]));
   const plan = planInline(findings, commentable);
   const mine = new Map<string, { id: number; body: string }>();
@@ -232,7 +236,7 @@ export async function syncInlineComments(gh: Pick<GitHubClient, "listReviewComme
       restored++;
     }
   }
-  for (const [fp, old] of mine) {
+  for (const [fp, old] of complete ? mine : []) {
     if (!plan.current.has(fp) && !old.body.includes(STALE_MARKER)) {
       await gh.updateReviewComment(old.id, staleBody(old.body, pr.headSha));
       staled++;
@@ -242,5 +246,5 @@ export async function syncInlineComments(gh: Pick<GitHubClient, "listReviewComme
   const posting = fresh.slice(0, MAX_INLINE_PER_RUN);
   if (posting.length) await gh.createReview(pr.number, pr.headSha, posting.map((c) => c.comment));
   const left = fresh.length - posting.length;
-  return `Inline comments: ${posting.length} new${left ? ` (${left} more not posted: ${MAX_INLINE_PER_RUN} per run, see the summary)` : ""}, ${staled} marked no longer detected, ${restored} restored.`;
+  return `Inline comments: ${posting.length} new${left ? ` (${left} more not posted: ${MAX_INLINE_PER_RUN} per run, see the summary)` : ""}, ${staled} marked no longer reported${complete ? "" : " (none: the review was incomplete, so a missing finding isn't known to be gone)"}, ${restored} restored.`;
 }

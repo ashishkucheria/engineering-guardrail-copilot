@@ -215,12 +215,15 @@ export function inlineBody(f: Finding): string {
   return parts.filter(Boolean).join("\n\n");
 }
 
-const STALE_NOTE = /^_No longer detected in `[0-9a-f]+`\._\n\n/;
+const STALE_NOTE = /^_No longer reported in `[0-9a-f]+` \(fixed, or waived by an exception\)\._\n\n/;
 
-/** The comment with a note that the finding is gone; the fingerprint stays so it can be matched again. */
+/**
+ * The comment with a note that the finding isn't reported any more (fixed, or waived by an exception
+ * since); the fingerprint stays so it can be matched again.
+ */
 export function staleBody(body: string, sha: string): string {
   const original = body.replace(STALE_MARKER, "").replace(STALE_NOTE, "");
-  return `${STALE_MARKER}_No longer detected in \`${sha.slice(0, 7)}\`._\n\n${original}`;
+  return `${STALE_MARKER}_No longer reported in \`${sha.slice(0, 7)}\` (fixed, or waived by an exception)._\n\n${original}`;
 }
 
 export const fingerprintOf = (body: string | undefined): string | null => new RegExp(`${FINGERPRINT_PREFIX}([0-9a-f]{16}) -->`).exec(body ?? "")?.[1] ?? null;

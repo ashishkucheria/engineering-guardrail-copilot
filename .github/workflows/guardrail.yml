@@ -1,6 +1,10 @@
 # This repository reviews its own pull requests with the Action it ships (rules only, so no key is
 # needed). Other repositories use it as ashishkucheria/engineering-guardrail-copilot@v1; see
 # docs/pr-reviewer-design.md.
+#
+# `uses: ./` runs the pull request's own copy of dist/action/index.cjs with this job's write token, so
+# a pull request can change what runs here. That is acceptable only because GitHub gives a fork's
+# pull_request run a read-only token and no secrets; never switch this to pull_request_target.
 name: Guardrail
 
 on:

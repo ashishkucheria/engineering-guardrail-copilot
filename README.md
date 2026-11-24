@@ -141,8 +141,10 @@ the real services; `npm run try:provider -- <provider>` does that with your key 
   warning and notice).
 - **One summary comment**, edited on every push, never a new one.
 - Optionally (`inline-comments: true`) a **comment on each new violation's line**, as one review. Comments carry a
-  hidden fingerprint (standard, file and quoted code, not the line), so a re-run doesn't repeat them; when a
-  finding is gone its comment is edited to say so. At most 25 new comments per run.
+  hidden fingerprint (standard, file and quoted code, not the line), so a re-run doesn't repeat them. When a
+  finding isn't reported any more (fixed, or waived by an exception) its comment is edited to say so; this is
+  skipped on a run that couldn't check everything, since a finding it couldn't look for isn't known to be gone.
+  At most 25 new comments per run. See the limits below.
 - The job summary, and the outputs `verdict`, `violations`, `blockers` and `incomplete`.
 
 The check is **advisory** unless you set `fail-on`: `blocker` fails it on any blocker, `major` on any blocker or
@@ -192,6 +194,11 @@ A waived finding doesn't count toward the verdict or the check, and stays in the
 approved it. An entry that is expired, too far out, misspelled or for an unknown standard is ignored, and the
 summary lists it.
 
+`approved-by` is a statement, not a check: the control is the reviewed merge that adds the entry (use branch
+protection and code owners on `.guardrail/`). `path: "*"` waives a standard everywhere, including a blocker, on the
+strength of a reason alone; the web app asks for a separate decision note in that case. Every waived finding is
+listed in the summary, so it stays visible.
+
 ### Forks, privacy and limits
 
 - On a `pull_request` from a fork, GitHub gives the workflow no secrets and a read-only token. The Action then runs
@@ -202,6 +209,10 @@ summary lists it.
   the verdict isn't `incomplete` because of it; the summary lists the standards that needed AI.
 - Secrets quoted in findings are redacted, and the model's text is neutralised (HTML, links, `@` mentions) before
   it goes into a comment.
+- Inline comments for **AI** findings may repeat or churn: the fingerprint hashes the code the model quoted, and
+  the model can quote a slightly different span on the next push, which reads as one finding gone and a new one.
+  Rule findings are stable. This hasn't been measured against a real model. A comment someone *deletes* is posted
+  again on the next push; resolve the thread instead.
 - Per file: 100 KB. Lock files, minified files, source maps and `dist/`, `build/`, `vendor/` are never sent to the
   model. The whole pull request is reviewed on every push.
 

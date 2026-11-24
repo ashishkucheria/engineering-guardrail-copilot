@@ -39690,10 +39690,10 @@ function inlineBody(f) {
   const parts = [`**${f.standardId}** (${f.severity}): ${clean(f.explanation, 600)}`, f.remediation ? `Fix: ${clean(f.remediation, 400)}` : "", `${FINGERPRINT_PREFIX}${fingerprint(f)} -->`];
   return parts.filter(Boolean).join("\n\n");
 }
-var STALE_NOTE = /^_No longer detected in `[0-9a-f]+`\._\n\n/;
+var STALE_NOTE = /^_No longer reported in `[0-9a-f]+` \(fixed, or waived by an exception\)\._\n\n/;
 function staleBody(body, sha) {
   const original = body.replace(STALE_MARKER, "").replace(STALE_NOTE, "");
-  return `${STALE_MARKER}_No longer detected in \`${sha.slice(0, 7)}\`._
+  return `${STALE_MARKER}_No longer reported in \`${sha.slice(0, 7)}\` (fixed, or waived by an exception)._
 
 ${original}`;
 }
@@ -39866,7 +39866,7 @@ async function reviewPullRequest(pr, inputs, deps) {
     if (inputs.summaryComment) await attempt(deps, "summary comment", () => upsertSummaryComment(gh, pr.number, markdown));
     if (inputs.inlineComments && parsed) {
       const input = parsed;
-      await attempt(deps, "inline comments", async () => deps.info(await syncInlineComments(gh, pr, findings, input)));
+      await attempt(deps, "inline comments", async () => deps.info(await syncInlineComments(gh, pr, findings, input, coverage.skipped.length === 0)));
     }
   }
   return { verdict, counts, conclusion, incomplete: verdict === "incomplete", summary: markdown };
@@ -39891,7 +39891,7 @@ function waivedFindings(findings, exceptions) {
     return e ? [{ finding: f, exceptionId: e.id, reason: e.reason, approvedBy: e.approvedBy, expires: e.expires }] : [];
   });
 }
-async function syncInlineComments(gh, pr, findings, input) {
+async function syncInlineComments(gh, pr, findings, input, complete = true) {
   const commentable = new Map(input.files.map((f) => [f.path, new Set(f.lines.map((l) => l.n))]));
   const plan = planInline(findings, commentable);
   const mine = /* @__PURE__ */ new Map();
@@ -39908,7 +39908,7 @@ async function syncInlineComments(gh, pr, findings, input) {
       restored++;
     }
   }
-  for (const [fp, old] of mine) {
+  for (const [fp, old] of complete ? mine : []) {
     if (!plan.current.has(fp) && !old.body.includes(STALE_MARKER)) {
       await gh.updateReviewComment(old.id, staleBody(old.body, pr.headSha));
       staled++;
@@ -39918,7 +39918,7 @@ async function syncInlineComments(gh, pr, findings, input) {
   const posting = fresh.slice(0, MAX_INLINE_PER_RUN);
   if (posting.length) await gh.createReview(pr.number, pr.headSha, posting.map((c) => c.comment));
   const left = fresh.length - posting.length;
-  return `Inline comments: ${posting.length} new${left ? ` (${left} more not posted: ${MAX_INLINE_PER_RUN} per run, see the summary)` : ""}, ${staled} marked no longer detected, ${restored} restored.`;
+  return `Inline comments: ${posting.length} new${left ? ` (${left} more not posted: ${MAX_INLINE_PER_RUN} per run, see the summary)` : ""}, ${staled} marked no longer reported${complete ? "" : " (none: the review was incomplete, so a missing finding isn't known to be gone)"}, ${restored} restored.`;
 }
 
 // action/main.ts

@@ -150,8 +150,11 @@ so temperature is sent only where it's accepted.
 - One review comment per violation on its changed line, posted as a single PR review.
 - Each carries a hidden fingerprint (standard, file, hash of the quoted code; not the line) so a re-run skips ones
   already posted instead of duplicating them. GitHub has no REST call to mark a comment outdated, so a comment
-  whose finding is gone is edited to say "No longer detected in `sha`" (the fingerprint stays), and put back if
-  the finding returns. Only the Action's own comments (author type `Bot`) are ever edited.
+  whose finding isn't reported any more is edited to say "No longer reported in `sha` (fixed, or waived by an
+  exception)" (the fingerprint stays), and put back if the finding returns. No comment is marked on a run with
+  coverage gaps (AI failure, `max-ai-calls`), since a finding it couldn't look for isn't known to be gone. Known
+  limits: AI evidence can differ between runs, so an AI finding's comment may be replaced instead of kept
+  (unmeasured); a deleted comment is posted again. Only the Action's own comments (author type `Bot`) are ever edited.
 - Only lines in the diff can be commented on (GitHub rejects the whole review otherwise): the first line of a
   finding's range that the diff shows. Findings elsewhere stay in the summary and the check. A finding off the
   diff still counts as "found", so its old comment isn't marked gone.

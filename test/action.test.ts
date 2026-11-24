@@ -597,7 +597,7 @@ describe("inline comments", () => {
     const body = inlineBody(f());
     const stale = staleBody(body, "abcdef123456");
     expect(stale).toContain(STALE_MARKER);
-    expect(stale).toContain("No longer detected in `abcdef1`");
+    expect(stale).toContain("No longer reported in `abcdef1` (fixed, or waived by an exception)");
     expect(stale).toContain(`guardrail:fp:${fingerprint(f())}`);
     expect(staleBody(stale, "1234567890")).toBe(staleBody(body, "1234567890"));
   });
@@ -636,6 +636,34 @@ describe("inline comments", () => {
     await syncInlineComments(gh, pr(), [], input());
     expect(log.edits.map((e) => e.id)).toEqual([1]);
     expect(log.edits[0]!.body).toContain(STALE_MARKER);
+  });
+  it("marks nothing when the review was incomplete: a finding the run couldn't look for isn't known to be gone", async () => {
+    const { gh, log } = api([{ id: 1, body: inlineBody(f()), user: { type: "Bot" } }]);
+    const msg = await syncInlineComments(gh, pr(), [], input(), false);
+    expect(log.edits).toEqual([]);
+    expect(msg).toContain("0 marked no longer reported (none: the review was incomplete");
+  });
+  it("still restores and posts on an incomplete review: those findings are present", async () => {
+    const { gh, log } = api([{ id: 1, body: staleBody(inlineBody(f()), "aaaaaaa"), user: { type: "Bot" } }]);
+    await syncInlineComments(gh, pr(), [f(), f({ standardId: "REL-002", lineStart: 6, lineEnd: 6, evidence: "q" })], input(), false);
+    expect(log.edits).toEqual([{ id: 1, body: inlineBody(f()) }]);
+    expect(log.reviews[0]!.comments).toHaveLength(1);
+  });
+  it("end to end: an AI outage on a later push leaves the earlier AI comment alone, a clean run marks it", async () => {
+    const files = [added("src/api.ts", "export function f() {", `  ${FETCH_LINE}`, "}")];
+    // A comment an earlier run posted for an AI finding on this line
+    const earlier = finding({ standardId: "REL-002", severity: "major", source: "llm", file: "src/api.ts", lineStart: 2, lineEnd: 2, evidence: FETCH_LINE });
+    const existing = [{ id: 9, body: inlineBody(earlier), user: { type: "Bot" } }];
+    const failing: Deps["makeClient"] = () => ({ model: "m", json: async () => { throw Object.assign(new Error("HTTP 503"), { retryable: true }); } });
+    const outage = harness({ files, makeClient: failing });
+    outage.deps.github.listReviewComments = async () => existing;
+    expect((await reviewPullRequest(pr(), inputs({ provider: "openai-compatible", apiKey: KEY, inlineComments: true }), outage.deps)).verdict).toBe("incomplete");
+    expect(outage.rec.edited).toEqual([]);
+
+    const clean = harness({ files, makeClient: () => ({ model: "m", json: async () => ({ findings: [] }) }) });
+    clean.deps.github.listReviewComments = async () => existing;
+    await reviewPullRequest(pr(), inputs({ provider: "openai-compatible", apiKey: KEY, inlineComments: true }), clean.deps);
+    expect(clean.rec.edited.map((e) => e.id)).toEqual([9]);
   });
   it("restores a stale comment when its finding comes back, without posting a duplicate", async () => {
     const { gh, log } = api([{ id: 1, body: staleBody(inlineBody(f()), "aaaaaaa"), user: { type: "Bot" } }]);
