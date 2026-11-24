@@ -1,6 +1,7 @@
-# Phase 2 design
+# Design (written in Phase 2, before the build)
 
-Status: **approved with decisions** (prompt 3 in `prompts.md`). Sections 11 and 12 record where the build differs.
+Status: **approved with decisions** (prompt 3 in [`prompts.md`](prompts.md)). Sections 11 and 12 record where the
+build differs. The "prompt N" references below point to that file.
 
 Decisions made:
 

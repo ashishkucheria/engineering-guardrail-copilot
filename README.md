@@ -9,18 +9,27 @@ developer feedback, challenges and exceptions into data a platform team can use.
 > claimed identity, so they show how the rules work, not who is allowed. In production this would be Cloudflare
 > Access, with roles from the identity provider.
 
-## Status
+## How it works
 
-Built in phases, one PR each, reviewed before merge. The design is in [`docs/phase-2-design.md`](docs/phase-2-design.md),
-and every prompt is recorded in [`prompts.md`](prompts.md).
+```mermaid
+flowchart LR
+  UI[React UI] -->|/api/*| W[API Worker]
+  W -->|start| WF[Review Workflow]
+  WF --> R[Deterministic rules]
+  WF --> AI[Workers AI: Llama 3.3]
+  AI --> V[Evidence verification]
+  R --> X[Apply exceptions]
+  V --> X
+  X --> DB[(D1)]
+  W <--> DB
+  W -->|challenges, chat| AI
+```
 
-| PR | Scope | State |
-|---|---|---|
-| 3-A Foundation | Worker + React, D1 schema, standards as YAML with versions and an audit log, demo identity, deterministic checks, eval harness architecture | merged |
-| 3-B AI review | Workflow pipeline, Llama 3.3 detection, evidence verification, challenges, rate limits and the daily AI budget | merged |
-| 3-C Interaction and insight | Exceptions with approval rules, accept/reject feedback, history, chat, dashboard, eval comparison | **this PR** |
+Standards are YAML files in [`standards/`](standards). A review runs the deterministic rules and the model over the
+code, keeps only AI findings whose quoted evidence is really in the code, applies approved exceptions, and stores
+everything in D1. The model can explain and argue; code decides what counts as a violation and what the verdict is.
 
-What works (tested; see below):
+## Features
 
 - Paste a snippet or unified diff. The review runs in a **Cloudflare Workflow**, one step at a time:
   load the standards snapshot and active exceptions, validate, deterministic rules, one **Llama 3.3** call per code
@@ -105,6 +114,25 @@ one review chunk is roughly 250 neurons). `LLM_MODE=off` runs the deterministic 
 Other local commands: `npm run db:seed:local` after editing `standards/*.yaml`; `npm run db:migrate:local` after
 pulling new migrations; `npm run budget:reset:local` to reset today's local AI budget.
 
+## Deploy to Cloudflare
+
+Works on a free account. Read **Known limits** first: the demo identity means anyone with the URL can act as any
+user and read every review, so don't paste real secrets, and consider putting the app behind Cloudflare Access.
+
+```sh
+npx wrangler login
+npm run deploy                                         # builds, creates the D1 database on first deploy, deploys
+npx wrangler d1 migrations apply DB --remote
+node scripts/seed.ts && npx wrangler d1 execute DB --remote --file=.wrangler/seed.sql
+```
+
+The deployed app uses the real model (`LLM_MODE=workers-ai` in `wrangler.jsonc`) with at most 20 app calls a day.
+For the eval endpoint, also run `npx wrangler secret put EVAL_TOKEN`. To remove everything:
+`npx wrangler delete`, `npx wrangler workflows delete guardrail-review` and `npx wrangler d1 delete guardrail-copilot`.
+
+Checked end to end on 2026-11-24 with the real model: reviews, challenges, chat, exception approve and revoke, and
+the dashboard, using 6 AI calls.
+
 ## Tests
 
 ```sh
@@ -172,7 +200,7 @@ each on 25 cases (2026-11-24).
 - Precision is 95%, with one OBS-001 false positive on a clean case. Blocker precision is 100% (10 of 10).
 - All 4 hard gates pass.
 - Run-to-run variance and the other configurations in design §8 aren't measured yet: they don't fit the free
-  allocation (prompt 8).
+  allocation.
 
 ## Layout
 
@@ -185,7 +213,7 @@ migrations/  D1 schema
 eval/        eval cases, scorer, runner, saved results
 scripts/     seed generator, standards loader, API smoke test
 test/        unit tests (Vitest)
-docs/        design
+docs/        build notes: the design and the prompt history
 ```
 
 ## Known limits
@@ -219,3 +247,18 @@ docs/        design
   errs on the safe side, like the budget itself.
 - Rejecting the same finding repeatedly is allowed. Each rejection is kept in the feedback history, but the
   dashboard counts each finding's latest disposition once.
+- The UI's tabs don't change the URL, so a link to `/exceptions` opens the review page.
+
+## Roadmap
+
+Review pull requests where they happen: a GitHub Action (or webhook) that sends a PR's diff to the review pipeline,
+reads the standards from the repository being reviewed, and posts the findings as PR comments. The web app stays the
+place for exceptions, challenges and the dashboard.
+
+## How it was built
+
+Built with an AI coding assistant (Claude Code), in phases, one pull request each, every one reviewed before merge.
+[`docs/build-notes/design.md`](docs/build-notes/design.md) is the design written before the build, with a record of
+where the build differs. [`docs/build-notes/prompts.md`](docs/build-notes/prompts.md) quotes every prompt verbatim
+up to the PR #4 review fixes, with what each was for and what came out of it. "Prompt N", "design §N" and "review
+of PR #N" in code comments point to these files and the merged pull requests.
