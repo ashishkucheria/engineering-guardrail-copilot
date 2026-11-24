@@ -51,7 +51,7 @@ export function ReviewResult({ review, showSnapshot = false, onChanged }: { revi
           <FindingGroup title="Violations" empty="No violations." findings={violations} review={review} onChanged={onChanged} />
           {suggestions.length > 0 && <FindingGroup title="Suggestions" empty="" findings={suggestions} review={review} onChanged={onChanged} />}
           {!review.viewerCanChallenge && review.findings.length > 0 && (
-            <p className="muted small">Only {review.author.name} (the author) or an approver can accept, reject, challenge or request exceptions for these findings.</p>
+            <p className="muted small">Only {review.author.name} (the author) or an approver can accept, reject, challenge or request exceptions for these findings, or chat about this review.</p>
           )}
           {review.findings.some((f) => f.challengeOutcome === "disputed") && (
             <p className="muted small">

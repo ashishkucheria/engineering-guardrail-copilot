@@ -707,7 +707,7 @@ export async function revokeException(db: D1Database, r: { id: string; by: Ref; 
       .prepare(
         `INSERT INTO review_events (review_id, step, outcome, duration_ms, detail, at)
          SELECT f.review_id, 'exception', 'ok', NULL,
-                'Exception ' || ?1 || ' revoked by ' || ?5 || ': ' || ?4 || '. Findings already waived stay waived.', ?3
+                'Exception ' || ?1 || ' revoked by ' || ?5 || ': ' || rtrim(?4, '.') || '. Findings already waived stay waived.', ?3
          FROM exceptions x JOIN findings f ON f.id = x.source_finding WHERE x.id = ?1 AND ${madeHere}`,
       )
       .bind(r.id, r.by.id, r.at, r.note, r.by.name),
