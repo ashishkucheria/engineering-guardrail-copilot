@@ -253,7 +253,7 @@ docs/        build notes: the design and the prompt history
 
 Review pull requests where they happen: a GitHub Action (or webhook) that sends a PR's diff to the review pipeline,
 reads the standards from the repository being reviewed, and posts the findings as PR comments. The web app stays the
-place for exceptions, challenges and the dashboard.
+place for exceptions, challenges and the dashboard. Design: [`docs/pr-reviewer-design.md`](docs/pr-reviewer-design.md).
 
 ## How it was built
 
