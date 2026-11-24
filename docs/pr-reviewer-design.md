@@ -22,7 +22,7 @@ talk to the web app or D1.
 | D5 | Gating | **Advisory by default.** `fail-on: blocker` or `major` makes the check fail; branch protection can then require it *(decided)* |
 | D6 | Packaging | **In this repository:** `action.yml` at the root, a bundled JavaScript action built from the same `core/`. Used as `ashishkucheria/engineering-guardrail-copilot@v1` *(decided)* |
 | D7 | Exceptions | **`.guardrail/exceptions.yaml`, read from the base commit,** so adding an exception needs a reviewed merge. Each entry: standard, path glob, reason, expiry (at most 90 days), who approved. Expired entries are ignored and listed in the summary *(decided)* |
-| D8 | Default model for `openai-compatible` | **`gpt-4o-mini`**, overridable with `model` *(decided)* |
+| D8 | Default models | **`gpt-6-luna`** (`openai-compatible`), **`claude-opus-5-5`** (`anthropic`), **`gemini-3.5-flash-lite`** (`gemini`), each overridable with `model`. `gpt-4o-mini` was chosen first, then dropped when building 4-A: it is deprecated and shuts down on 2027-01-14 *(decided)* |
 | D9 | Re-runs | **The whole PR on every push;** the concurrency group cancels superseded runs. No state kept between runs *(decided)* |
 
 ## 3. How a repository uses it
@@ -97,27 +97,38 @@ Outputs: `verdict`, `violations`, `blockers`, `incomplete`, for later steps.
 Today's limits were chosen for pasted input: 100 KB and 20 files. A PR can be bigger. For the Action:
 - Files are reviewed in the order GitHub returns them, up to `max-files` (default 50); the rest are coverage gaps.
 - The 100 KB limit applies per file instead of to the whole input.
-- Test files and files the standards can't apply to (lock files, images, generated `dist/`) are left out of the
-  model calls; the rules still see them where a rule needs them (TST-001 needs to know whether tests changed).
+- Generated files (lock files, minified files, source maps, `dist/`, `build/`, `vendor/`; `isGeneratedPath` in
+  `core/diff.ts`) are left out of the model calls; the rules still see them. Test files are still sent, as in the
+  app: a hard-coded secret in a test is still a finding.
 
 ## 5. Providers
 
-All four implement today's interface, `LlmClient.json(messages, schema, { maxTokens, seed })`, with temperature 0.
+All four implement today's interface, `LlmClient.json(messages, schema, { maxTokens, seed })`. Checked against
+the providers' docs when 4-A was built (2026-11-24); current models no longer all accept sampling parameters,
+so temperature is sent only where it's accepted.
 
-| Provider | Default model | How JSON is enforced | Seed |
+| Provider | Default model | How JSON is enforced | Temperature / seed |
 |---|---|---|---|
-| `openai-compatible` | `gpt-4o-mini` | `response_format: { type: "json_schema", ... }`, falling back to `json_object` where a server rejects schemas | if the server accepts it |
-| `anthropic` | a current Claude model, chosen when this is built | one forced tool whose input schema is the detection schema | not supported; retries rely on the existing validation and re-ask |
-| `gemini` | a current Gemini Flash model, chosen when this is built | `responseMimeType: application/json` plus `responseSchema` | if supported |
-| `workers-ai` | `@cf/meta/llama-3.3-70b-instruct-fp8-fast` | the app's current client, over `POST /accounts/{id}/ai/run/{model}` | yes |
+| `openai-compatible` | `gpt-6-luna` | Chat Completions `response_format: json_schema` with `strict: true`. A 400 naming the schema switches to `json_object` with the schema in the system prompt | sent; a 400 naming either drops both (reasoning models reject them). A 400 naming `max_completion_tokens` switches to `max_tokens` |
+| `anthropic` | `claude-opus-5-5` | structured outputs (`output_config.format`), through the official SDK. Forced tool use is rejected by current Claude models | not sent: API version `2026-10-21` rejects sampling parameters |
+| `gemini` | `gemini-3.5-flash-lite` | Interactions API (`POST /v1beta/interactions`; Google calls `generateContent` legacy) with `response_format` and a schema; `store: false` | seed sent; temperature not sent (current models ignore it) |
+| `workers-ai` | `@cf/meta/llama-3.3-70b-instruct-fp8-fast` | the app's request, over `POST /accounts/{id}/ai/run/{model}` | both sent |
 
-- The output schemas use only what all four accept (no `oneOf`, no recursive types); each adapter maps them.
-- Each adapter has a request timeout and turns HTTP 429/5xx into a retryable error, so today's retry loop (3
-  attempts, new seed each time) works unchanged.
+- `anthropic` also sends server-side fallback (`fallbacks: "default"`), so a request the model declines is
+  re-run on Anthropic's fallback model; on a model without fallbacks it runs as it is.
+- The OpenAI-compatible step-downs are remembered for the rest of the run, so each costs one extra request once.
+- Thinking models count their reasoning against the output limit, so `openai-compatible`, `anthropic` and
+  `gemini` raise the engine's 2,048-token ceiling to 16,000.
+- Strict modes need `additionalProperties: false` on every object; the adapters add it, so `core/` schemas
+  stay as they are.
+- Each adapter has a request timeout and throws a `ProviderError` with `retryable`: true for network errors,
+  timeouts, 408, 409, 429 and 5xx; false for other 4xx (a bad key, an unknown model). The engine no longer
+  retries an error marked `retryable: false`. The Anthropic SDK's own retries are off, so every attempt is the
+  engine's.
+- Every adapter takes an injectable `fetch`. The tests mock it; 4-B wraps it to count each HTTP request
+  against `max-ai-calls`, so the step-downs count too.
 - The key is passed only in the request header and is registered as a secret with the Actions toolkit so it is
   masked in logs.
-- Model names and API details are checked against each provider's current docs at build time, not assumed from
-  this document.
 
 ## 6. Output on the PR
 

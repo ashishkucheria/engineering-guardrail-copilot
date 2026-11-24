@@ -220,6 +220,11 @@ export interface LlmDetectorOptions extends DetectOptions {
    */
   reserve?: () => Promise<boolean>;
   onChunk?: (label: string, outcome: "ok" | "failed" | "skipped", detail: string) => void;
+  /**
+   * Files the model isn't asked about (the Action leaves out lock files and generated output).
+   * Not a coverage gap: no standard is meant for them, and the rules still see them.
+   */
+  skipPath?: (path: string) => boolean;
 }
 
 export function llmDetector(client: LlmClient, opts: LlmDetectorOptions = {}): Detector {
@@ -228,7 +233,8 @@ export function llmDetector(client: LlmClient, opts: LlmDetectorOptions = {}): D
     async detect(input: ParsedInput, enabled: Standard[]) {
       const standards = llmStandards(enabled);
       if (standards.length === 0) return { findings: [] };
-      const plan = planChunks(input);
+      const skipPath = opts.skipPath;
+      const plan = planChunks(skipPath ? { ...input, files: input.files.filter((f) => !skipPath(f.path)) } : input);
       const findings: Finding[] = [];
       const skipped = [...plan.skipped];
       let budgetOut = false;
@@ -248,6 +254,8 @@ export function llmDetector(client: LlmClient, opts: LlmDetectorOptions = {}): D
             done = true;
           } catch (e) {
             lastError = e instanceof Error ? e.message : String(e);
+            // A provider error a retry can't fix (bad key, unknown model): don't spend another call.
+            if ((e as { retryable?: unknown })?.retryable === false) break;
           }
         }
         if (done) continue;

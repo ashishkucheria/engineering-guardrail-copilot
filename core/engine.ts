@@ -2,7 +2,7 @@
 // The eval runner and the tests call `review()`. The Workflow runs the same pieces as separate steps
 // (parseInput, runRules, the LLM detector's chunks) and then the same `finalize()`, so what the eval
 // measures is what the app runs.
-import { parseInput } from "./diff.ts";
+import { parseInput, type InputLimits } from "./diff.ts";
 import { applyExceptions, type ActiveException } from "./exceptions.ts";
 import { runRules } from "./rules.ts";
 import { computeVerdict } from "./verdict.ts";
@@ -35,8 +35,8 @@ export interface ReviewResult {
   engine: string;
 }
 
-export async function review(raw: string, standards: Standard[], detectors: Detector[] = [ruleDetector]): Promise<ReviewResult> {
-  const input = parseInput(raw);
+export async function review(raw: string, standards: Standard[], detectors: Detector[] = [ruleDetector], limits?: InputLimits): Promise<ReviewResult> {
+  const input = parseInput(raw, limits);
   const enabled = standards.filter((s) => s.enabled);
   const skipped: Coverage["skipped"] = [];
   const all: Finding[] = [];
