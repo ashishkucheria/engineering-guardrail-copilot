@@ -1,7 +1,6 @@
 # Design: Guardrail PR reviewer (GitHub Action)
 
-Status: **draft for review.** Decisions already made are marked *(decided)*; the questions at the end are still
-open.
+Status: **draft for review.** All decisions are made and marked *(decided)*; nothing is implemented yet.
 
 ## 1. Goal
 
@@ -22,6 +21,9 @@ talk to the web app or D1.
 | D4 | Output on the PR | **Check run with annotations, one summary comment, inline review comments**, each switchable. Default: check + summary on, inline off *(decided)* |
 | D5 | Gating | **Advisory by default.** `fail-on: blocker` or `major` makes the check fail; branch protection can then require it *(decided)* |
 | D6 | Packaging | **In this repository:** `action.yml` at the root, a bundled JavaScript action built from the same `core/`. Used as `ashishkucheria/engineering-guardrail-copilot@v1` *(decided)* |
+| D7 | Exceptions | **`.guardrail/exceptions.yaml`, read from the base commit,** so adding an exception needs a reviewed merge. Each entry: standard, path glob, reason, expiry (at most 90 days), who approved. Expired entries are ignored and listed in the summary *(decided)* |
+| D8 | Default model for `openai-compatible` | **`gpt-4o-mini`**, overridable with `model` *(decided)* |
+| D9 | Re-runs | **The whole PR on every push;** the concurrency group cancels superseded runs. No state kept between runs *(decided)* |
 
 ## 3. How a repository uses it
 
@@ -86,7 +88,8 @@ Outputs: `verdict`, `violations`, `blockers`, `incomplete`, for later steps.
    client (§5). Same chunking, evidence verification, pre-existing-line handling, redaction and caps as the app.
    Each model call, retries included, counts against `max-ai-calls`; past it, the remaining chunks are coverage
    gaps and the verdict is `incomplete`.
-4. **Apply exceptions** from `.guardrail/exceptions.yaml` at the base commit (see open question Q1).
+4. **Apply exceptions** from `.guardrail/exceptions.yaml` at the base commit (D7), with today's
+   `core/exceptions.ts` glob matching. A waived finding stays in the summary, marked waived, with the reason.
 5. **Publish** (§6), then set the outputs and the job result (§7).
 
 ### Limits
@@ -195,14 +198,4 @@ CI rebuilds the bundle and fails if `dist/action/` is out of date.
 |---|---|
 | 4-A | Provider adapters (all four) behind `LlmClient`, standards from YAML text, per-file limits; unit tests. No Action yet |
 | 4-B | The Action: `action.yml`, reading the PR, check run, summary comment, gating, fork handling, bundle and CI check; dogfood with `provider: none` |
-| 4-C | Inline comments with fingerprints, exceptions file (if Q1 is yes), README and a `v1` release tag |
-
-## 12. Open questions
-
-- **Q1. Exceptions.** Support `.guardrail/exceptions.yaml` (standard, path glob, reason, expiry ≤ 90 days, who
-  approved), read from the base commit, so adding one needs a reviewed merge? Or leave exceptions out of v1?
-- **Q2. Default model** for `openai-compatible`: `gpt-4o-mini` (cheap, widely available), or no default so the
-  repository must choose?
-- **Q3. Re-runs.** Review the whole PR on every push (simple, predictable cost per push), or only files changed
-  since the last reviewed commit (cheaper, more state to get right)? Proposal: whole PR, with the concurrency
-  group cancelling superseded runs.
+| 4-C | Inline comments with fingerprints, exceptions file (D7), README and a `v1` release tag |
