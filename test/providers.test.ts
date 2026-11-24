@@ -2,9 +2,9 @@
 import { describe, expect, it } from "vitest";
 import { anthropicClient } from "../action/providers/anthropic.ts";
 import { geminiClient, GEMINI_URL } from "../action/providers/gemini.ts";
-import { errorDetail, MIN_MAX_TOKENS, ProviderError, strictSchema, type FetchFn } from "../action/providers/http.ts";
+import { errorDetail, MIN_MAX_TOKENS, postJson, ProviderError, strictSchema, type FetchFn } from "../action/providers/http.ts";
 import { createClient } from "../action/providers/index.ts";
-import { openAiCompatibleClient, stepDown } from "../action/providers/openai-compatible.ts";
+import { openAiCompatibleClient, stepDown, tokenLimitFrom } from "../action/providers/openai-compatible.ts";
 import { workersAiRestClient } from "../action/providers/workers-ai.ts";
 import { parseDetection, type LlmClient } from "../core/llm.ts";
 import { detectionSchema, type ChatMessage } from "../core/prompts.ts";
@@ -112,6 +112,34 @@ describe("openai-compatible", () => {
     expect(stepDown(q, "Unrecognized request argument supplied: max_completion_tokens")).toBe(false);
   });
 
+  it("asks for less when a 400 names the server's output-token limit, instead of changing parameters", async () => {
+    const m = mockFetch(
+      json({ error: { message: "Invalid 'max_completion_tokens': integer above maximum value. Expected a value <= 8192, but got 16000." } }, 400),
+      openAiOk(JSON.stringify(ANSWER)),
+      openAiOk(JSON.stringify(ANSWER)),
+    );
+    const c = openAiCompatibleClient({ apiKey: KEY, fetch: m.fetch });
+    await c.json(MESSAGES, SCHEMA);
+    await c.json(MESSAGES, SCHEMA);
+    expect(m.calls.map((x) => x.body.max_completion_tokens)).toEqual([MIN_MAX_TOKENS, 8192, 8192]); // remembered
+    expect(m.calls.every((x) => !("max_tokens" in x.body) && "temperature" in x.body)).toBe(true);
+  });
+
+  it("reads token limits from common wordings, and ignores anything else", () => {
+    expect(tokenLimitFrom("max_tokens must be less than or equal to 8192 for this model")).toBe(8192);
+    expect(tokenLimitFrom("The maximum number of output tokens is 4,096")).toBeUndefined(); // wording we don't guess at
+    expect(tokenLimitFrom("Requested tokens exceed the limit of 8,192")).toBe(8192);
+    expect(tokenLimitFrom("at most 100 items")).toBeUndefined(); // no mention of tokens
+    expect(tokenLimitFrom("max_completion_tokens must be at most 10")).toBeUndefined(); // too small to be a real ceiling
+  });
+
+  it("doesn't drop a parameter when the 400 is about its value, not its support", () => {
+    const q = { noSampling: false, legacyMaxTokens: false, jsonObject: false };
+    expect(stepDown(q, "temperature must be between 0 and 2")).toBe(false);
+    expect(stepDown(q, "max_completion_tokens must be a positive integer")).toBe(false);
+    expect(q).toEqual({ noSampling: false, legacyMaxTokens: false, jsonObject: false });
+  });
+
   it("gives up on a 400 it can't step down from, without retrying", async () => {
     const m = mockFetch(json({ error: { message: "messages: too long" } }, 400));
     await expectProviderError(openAiCompatibleClient({ apiKey: KEY, fetch: m.fetch }).json(MESSAGES, SCHEMA), false, /HTTP 400: messages: too long/);
@@ -135,6 +163,21 @@ describe("openai-compatible", () => {
     await expectProviderError(openAiCompatibleClient({ apiKey: KEY, fetch: refused.fetch }).json(MESSAGES, SCHEMA), true, /refused/);
     const out = await openAiCompatibleClient({ apiKey: KEY, fetch: mockFetch(openAiOk("{not json")).fetch }).json(MESSAGES, SCHEMA);
     expect(() => parseDetection(out)).toThrow(/not valid JSON/);
+  });
+});
+
+describe("postJson", () => {
+  it("turns a timeout while the body is still arriving into a retryable provider error", async () => {
+    const stalled: FetchFn = (async (_u: unknown, init?: RequestInit) => {
+      const body = new ReadableStream({ start: (c) => init!.signal!.addEventListener("abort", () => c.error(init!.signal!.reason)) });
+      return new Response(body, { status: 200 });
+    }) as FetchFn;
+    const keepAlive = setTimeout(() => {}, 5_000); // AbortSignal.timeout's own timer doesn't keep Node running
+    try {
+      await expectProviderError(postJson("https://x.test", {}, {}, { fetch: stalled, timeoutMs: 50, provider: "demo" }), true, /^demo: request timed out/);
+    } finally {
+      clearTimeout(keepAlive);
+    }
   });
 });
 

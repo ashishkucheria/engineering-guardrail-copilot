@@ -42,7 +42,10 @@ export interface PostOptions {
 /** POST JSON and return the parsed body, or throw a ProviderError. Never echoes request headers. */
 export async function postJson(url: string, headers: Record<string, string>, body: unknown, opts: PostOptions): Promise<unknown> {
   const f = opts.fetch ?? fetch;
+  // One try block for the request and for reading the body: the timeout covers both, and a timeout
+  // while the body streams in must read as a provider error, not a bare TimeoutError.
   let res: Response;
+  let text: string;
   try {
     res = await f(url, {
       method: "POST",
@@ -50,11 +53,11 @@ export async function postJson(url: string, headers: Record<string, string>, bod
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS),
     });
+    text = await res.text();
   } catch (e) {
     const timedOut = e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError");
     throw new ProviderError(`${opts.provider}: ${timedOut ? "request timed out" : `network error (${e instanceof Error ? e.message : String(e)})`}`, undefined, true);
   }
-  const text = await res.text();
   if (!res.ok) {
     throw new ProviderError(`${opts.provider}: HTTP ${res.status}: ${errorDetail(text)}`, res.status, isRetryableStatus(res.status));
   }

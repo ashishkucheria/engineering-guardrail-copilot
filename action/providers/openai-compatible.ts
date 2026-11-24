@@ -31,6 +31,9 @@ export function openAiCompatibleClient(opts: OpenAiCompatibleOptions): LlmClient
   const model = opts.model || OPENAI_DEFAULT_MODEL;
   const url = `${(opts.baseUrl || OPENAI_BASE_URL).replace(/\/+$/, "")}/chat/completions`;
   const quirks: Quirks = { noSampling: false, legacyMaxTokens: false, jsonObject: false };
+  // Output-token ceiling for this model. Starts high (thinking models spend tokens on reasoning) and
+  // drops to the server's own limit if it names one.
+  let ceiling: number | undefined;
 
   const body = (messages: ChatMessage[], schema: JsonSchema, maxTokens: number, seed: number | undefined) => ({
     model,
@@ -45,8 +48,9 @@ export function openAiCompatibleClient(opts: OpenAiCompatibleOptions): LlmClient
   return {
     model,
     async json(messages, schema, callOpts) {
-      const maxTokens = Math.max(callOpts?.maxTokens ?? 0, MIN_MAX_TOKENS);
+      const wanted = Math.max(callOpts?.maxTokens ?? 0, MIN_MAX_TOKENS);
       for (;;) {
+        const maxTokens = Math.min(wanted, ceiling ?? wanted);
         try {
           const res = await postJson(url, { authorization: `Bearer ${opts.apiKey}` }, body(messages, schema, maxTokens, callOpts?.seed), {
             fetch: opts.fetch,
@@ -55,15 +59,35 @@ export function openAiCompatibleClient(opts: OpenAiCompatibleOptions): LlmClient
           });
           return readChoice(res);
         } catch (e) {
-          if (!(e instanceof ProviderError) || e.status !== 400 || !stepDown(quirks, e.message)) throw e;
+          if (!(e instanceof ProviderError) || e.status !== 400) throw e;
+          // A value error ("must be at most 8192") is fixed by asking for less, not by changing the parameter.
+          const limit = tokenLimitFrom(e.message);
+          if (limit !== undefined && limit < maxTokens) ceiling = limit;
+          else if (!stepDown(quirks, e.message)) throw e;
         }
       }
     },
   };
 }
 
-/** Change the request after a 400 that names a parameter. False when there's nothing left to change. */
+/** A server's own output-token limit, when a 400 names one ("... <= 8192", "at most 8,192 tokens"). */
+export function tokenLimitFrom(message: string): number | undefined {
+  if (!/token/i.test(message)) return undefined;
+  const m = /(?:<=|≤|less than or equal to|at most|no more than|maximum(?: value)?(?: allowed)?(?: is| of)?|max(?: allowed)?(?: is| of)?|limit(?: is| of)?)\s*:?\s*(\d[\d,]*)/i.exec(message);
+  const n = m ? Number(m[1]!.replace(/,/g, "")) : NaN;
+  return Number.isFinite(n) && n >= 256 ? n : undefined;
+}
+
+/** Words that say a parameter was refused, as opposed to given a bad value. */
+const REFUSED = /unsupported|unrecognized|not supported|does not support|unknown|not allowed|not permitted|extra inputs|only the default|additional properties|invalid parameter/i;
+
+/**
+ * Change the request after a 400 that names a parameter the server refuses. False when there's
+ * nothing left to change. A message that names a parameter without refusing it (a value error) is
+ * not a reason to drop the parameter.
+ */
 export function stepDown(q: Quirks, message: string): boolean {
+  if (!REFUSED.test(message)) return false;
   const m = message.toLowerCase();
   let changed = false;
   if (!q.noSampling && (m.includes("temperature") || m.includes("seed"))) changed = q.noSampling = true;

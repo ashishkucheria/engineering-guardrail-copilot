@@ -41,7 +41,7 @@ export function isGeneratedPath(path: string): boolean {
 export interface InputLimits {
   /** Files reviewed; the rest are coverage gaps. Default MAX_FILES (the app's pasted-input limit). */
   maxFiles?: number;
-  /** Per-file limit on the new code's size, for the Action. Default: none (the app limits the whole input). */
+  /** Per-file limit on the new code's size, for the Action (generated files are exempt). Default: none (the app limits the whole input). */
   maxFileBytes?: number;
 }
 
@@ -79,7 +79,9 @@ export function parseInput(input: string, limits: InputLimits = {}): ParsedInput
       coverage.skipped.push({ file: f.path, reason: `over the ${maxFiles}-file limit` });
       continue;
     }
-    if (limits.maxFileBytes !== undefined && fileBytes(f.lines) > limits.maxFileBytes) {
+    // Generated files (a big lock file) are exempt: the model skips them anyway, so the size limit
+    // would only turn every PR that touches one into a coverage gap.
+    if (limits.maxFileBytes !== undefined && !isGeneratedPath(f.path) && fileBytes(f.lines) > limits.maxFileBytes) {
       coverage.skipped.push({ file: f.path, reason: `over the ${Math.round(limits.maxFileBytes / 1000)} KB per-file limit` });
       continue;
     }

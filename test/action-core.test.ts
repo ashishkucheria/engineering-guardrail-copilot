@@ -32,6 +32,15 @@ describe("input limits", () => {
     expect(p.coverage).toMatchObject({ filesTotal: 2, filesReviewed: 1, skipped: [{ file: "big.ts", reason: "over the 1 KB per-file limit" }] });
   });
 
+  it("exempts generated files from the per-file size limit, so a big lock file isn't a coverage gap", async () => {
+    const lock = Array.from({ length: 500 }, (_, i) => `"pkg${i}": { "version": "1.0.${i}" },`);
+    const input = diff(...fileDiff("package-lock.json", ...lock), ...fileDiff("src/big.ts", "y".repeat(2_000)));
+    const p = parseInput(input, { maxFileBytes: 1_000 });
+    expect(p.files.map((f) => f.path)).toEqual(["package-lock.json"]); // kept, so the rules still see it
+    expect(p.coverage.skipped).toEqual([{ file: "src/big.ts", reason: "over the 1 KB per-file limit" }]); // a written file over the limit still is a gap
+    expect((await review(diff(...fileDiff("package-lock.json", ...lock)), [], undefined, { maxFileBytes: 1_000 })).verdict).toBe("pass");
+  });
+
   it("passes limits through review()", async () => {
     const r = await review(diff(...fileDiff("big.ts", "y".repeat(2_000))), [], undefined, { maxFileBytes: 1_000 });
     expect(r.verdict).toBe("incomplete");
