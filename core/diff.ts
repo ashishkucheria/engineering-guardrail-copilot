@@ -26,12 +26,34 @@ export function isCodePath(path: string): boolean {
 }
 
 /**
+ * Lock files, minified bundles and build output: generated, not written, so the model isn't asked
+ * about them (the Action passes this as the LLM detector's skipPath).
+ */
+export function isGeneratedPath(path: string): boolean {
+  return (
+    /(^|\/)(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?|Cargo\.lock|poetry\.lock|uv\.lock|Pipfile\.lock|composer\.lock|Gemfile\.lock|go\.sum)$/.test(path) ||
+    /\.min\.(js|css)$/i.test(path) ||
+    /\.map$/i.test(path) ||
+    /(^|\/)(dist|build|vendor|node_modules)\//.test(path)
+  );
+}
+
+export interface InputLimits {
+  /** Files reviewed; the rest are coverage gaps. Default MAX_FILES (the app's pasted-input limit). */
+  maxFiles?: number;
+  /** Per-file limit on the new code's size, for the Action. Default: none (the app limits the whole input). */
+  maxFileBytes?: number;
+}
+
+/**
  * Parse pasted input into files with new-file line numbers.
  * - Snippet: one file, every line counts as added.
  * - Diff: removed lines are dropped (they are not in the new code), context lines are kept with
- *   `added: false`, deleted files are ignored, and files past MAX_FILES are recorded as skipped.
+ *   `added: false`, deleted files are ignored, and files past the file limit (or over the per-file
+ *   size limit, when one is set) are recorded as skipped.
  */
-export function parseInput(input: string): ParsedInput {
+export function parseInput(input: string, limits: InputLimits = {}): ParsedInput {
+  const maxFiles = limits.maxFiles ?? MAX_FILES;
   const text = input.replace(/\r\n?/g, "\n");
   if (!looksLikeDiff(text)) {
     const lines = text.split("\n").map((t, i): SourceLine => ({ n: i + 1, text: t, added: true }));
@@ -53,8 +75,12 @@ export function parseInput(input: string): ParsedInput {
       coverage.skipped.push({ file: f.path, reason: "binary file" });
       continue;
     }
-    if (files.length >= MAX_FILES) {
-      coverage.skipped.push({ file: f.path, reason: `over the ${MAX_FILES}-file limit` });
+    if (files.length >= maxFiles) {
+      coverage.skipped.push({ file: f.path, reason: `over the ${maxFiles}-file limit` });
+      continue;
+    }
+    if (limits.maxFileBytes !== undefined && fileBytes(f.lines) > limits.maxFileBytes) {
+      coverage.skipped.push({ file: f.path, reason: `over the ${Math.round(limits.maxFileBytes / 1000)} KB per-file limit` });
       continue;
     }
     files.push({ path: f.path, lines: f.lines, isTest: isTestPath(f.path) });
@@ -131,6 +157,11 @@ function splitDiffFiles(text: string): RawFile[] {
     else inHunk = false; // something else: the hunk is over
   }
   return out;
+}
+
+function fileBytes(lines: SourceLine[]): number {
+  const enc = new TextEncoder();
+  return lines.reduce((n, l) => n + enc.encode(l.text).byteLength + 1, 0);
 }
 
 function stripPrefix(p: string): string {
