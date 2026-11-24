@@ -1,22 +1,27 @@
-// Eval runner: `npm run eval -- --config rules [--save] [--strict]`
+// Eval runner: `npm run eval -- --config rules|llm [--target URL] [--case ID] [--save] [--strict]`
 //
-// Runs every case in eval/cases through the same review() the Worker uses, scores the result
-// against the labels, prints a table, and with --save writes eval/results/<date>-<config>.json.
-// --strict exits non-zero on any false positive, miss or must_not_flag failure (used in CI for the
-// deterministic rules config; LLM configs are compared on scores instead).
+// Runs every case in eval/cases through the same review() and detectors the app uses, scores the
+// result against the labels, prints a table, and with --save writes eval/results/<date>-<config>.json.
+// A failed hard-gate case (e.g. prompt injection) always fails the run. --strict also fails it on
+// any false positive, miss or must_not_flag failure (used in CI for the deterministic rules config;
+// LLM configs are compared on scores instead).
+//
+// The `llm` config calls the model through a running app (default http://localhost:5173) and spends
+// that app's eval budget: one call per case on the current cases.
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { review } from "../core/engine.ts";
 import { loadStandards } from "../scripts/load-standards.ts";
-import { CONFIGS } from "./configs.ts";
+import { CONFIGS, EvalAbort } from "./configs.ts";
 import { scoreCase, summarize, type CaseScore, type EvalCase, type Metrics } from "./score.ts";
 
 const { values } = parseArgs({
   options: {
     config: { type: "string", default: "rules" },
     case: { type: "string" },
+    target: { type: "string", default: process.env.EVAL_TARGET ?? "http://localhost:5173" },
     save: { type: "boolean", default: false },
     strict: { type: "boolean", default: false },
   },
@@ -38,10 +43,29 @@ const cases: EvalCase[] = readdirSync(casesDir)
 const standards = await loadStandards();
 const inScope = config.scope(standards);
 
+const detectors = (() => {
+  try {
+    return config.detectors({ target: values.target! });
+  } catch (e) {
+    console.error((e as Error).message);
+    process.exit(2);
+  }
+})();
+
 const scores: CaseScore[] = [];
 const started = Date.now();
 for (const c of cases) {
-  const r = await review(c.input, standards, config.detectors);
+  let r;
+  try {
+    r = await review(c.input, standards, detectors);
+  } catch (e) {
+    if (e instanceof EvalAbort) {
+      console.error(`Stopped after ${scores.length} case(s): ${e.message}`);
+      process.exit(2);
+    }
+    throw e;
+  }
+  for (const s of r.coverage.skipped) console.log(`       not reviewed   ${s.file}: ${s.reason}`);
   const s = scoreCase(c, r.findings, inScope);
   scores.push(s);
   const mark = s.fp === 0 && s.fn === 0 && s.mustNotFlagViolated.length === 0 ? "ok  " : "MISS";
@@ -60,6 +84,9 @@ for (const [id, m] of Object.entries(summary.byStandard)) console.log(row(id, m)
 console.log(row("OVERALL", summary.overall));
 console.log(`Clean cases with a false positive: ${summary.cleanCases.withFalsePositive}/${summary.cleanCases.total}`);
 if (summary.mustNotFlagFailures.length) console.log(`must_not_flag failures: ${JSON.stringify(summary.mustNotFlagFailures)}`);
+const bp = summary.blockerPrecision;
+console.log(`Blocker precision: ${pct(bp.precision).trim()} (${bp.tp} correct, ${bp.fp} false; a false blocker stops a change until an approver grants an exception)`);
+console.log(`Hard gates: ${summary.hardGates.total - summary.hardGates.failed.length}/${summary.hardGates.total} passed${summary.hardGates.failed.length ? `; FAILED: ${summary.hardGates.failed.join(", ")}` : ""}`);
 console.log(`Took ${Date.now() - started} ms`);
 
 if (values.save) {
@@ -84,6 +111,10 @@ if (values.save) {
   console.log(`Saved ${file}`);
 }
 
+if (summary.hardGates.failed.length > 0) {
+  console.error(`Hard gate failed: ${summary.hardGates.failed.join(", ")}`);
+  process.exit(1);
+}
 if (values.strict && (summary.overall.fp > 0 || summary.overall.fn > 0 || summary.mustNotFlagFailures.length > 0)) {
   console.error("Strict mode: the eval has false positives, misses or must_not_flag failures.");
   process.exit(1);

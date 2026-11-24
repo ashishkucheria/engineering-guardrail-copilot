@@ -1,0 +1,13 @@
+{
+  "id": "rel-003-bounded-retry-clean",
+  "description": "Retry with a maximum number of attempts and backoff.",
+  "tags": [
+    "llm",
+    "clean"
+  ],
+  "input": "export async function sendWithRetry(send, payload) {\n  for (let attempt = 1; attempt <= 3; attempt++) {\n    const res = await send(payload);\n    if (res.ok) return res;\n    await sleep(200 * 2 ** attempt);\n  }\n  throw new Error(\"send failed after 3 attempts\");\n}\n",
+  "expected": [],
+  "must_not_flag": [
+    "REL-003"
+  ]
+}

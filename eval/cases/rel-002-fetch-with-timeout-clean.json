@@ -1,0 +1,13 @@
+{
+  "id": "rel-002-fetch-with-timeout-clean",
+  "description": "Outbound fetch with an AbortSignal timeout.",
+  "tags": [
+    "llm",
+    "clean"
+  ],
+  "input": "export async function getRates() {\n  const res = await fetch(\"https://rates.example.com/latest\", { signal: AbortSignal.timeout(5000) });\n  if (!res.ok) throw new Error(`rates: HTTP ${res.status}`);\n  return res.json();\n}\n",
+  "expected": [],
+  "must_not_flag": [
+    "REL-002"
+  ]
+}

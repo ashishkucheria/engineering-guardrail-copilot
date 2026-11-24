@@ -11,7 +11,10 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+    env:
+      # No Cloudflare account in CI: remote bindings (Workers AI) are off and the fake model is used.
+      LOCAL_ONLY: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -20,15 +23,16 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Generated Worker types are up to date
-        run: npx wrangler types --check
+        run: npm run types:check
       - run: npm run typecheck
       - run: npm test
       - name: Eval (rule engine, no network)
         run: npm run eval -- --config rules --strict
       - name: Build
         run: npm run build
-      - name: API smoke test against a local server
+      - name: API smoke test against a local server (fake model, no Cloudflare account, no AI calls)
         run: |
+          echo 'LLM_MODE=fake' > .dev.vars
           npm run db:setup:local
           npx vite dev --port 5173 --strictPort > dev.log 2>&1 &
           for i in $(seq 1 60); do curl -sf http://localhost:5173/api/users > /dev/null && break; sleep 1; done

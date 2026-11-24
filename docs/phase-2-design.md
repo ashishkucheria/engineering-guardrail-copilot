@@ -566,3 +566,40 @@ shows today's budget use.
 
 Durable Objects stay out (prompt 2): D1's single writer gives the strict counter, and the binding gives burst
 limits.
+
+---
+
+## 11. Implementation notes from PR 3-B
+
+Where the build differs from the design above, and why. Each item is called out in the PR for review.
+
+| # | Design | Built | Why |
+|---|---|---|---|
+| 1 | Budget defaults 1,500 app / 1,000 eval calls a day | **20 app / 25 eval** | The account is on the Workers AI free allocation (10,000 neurons a day, about 40 calls). Over that, calls fail instead of costing money; the caps keep the app, local development and the eval inside it. Change the vars for a paid account. |
+| 2 | A review reserves `chunks + 1` calls up front | **Every model call, retries included, reserves 1 call just before it is made**; no up-front reservation | Review of PR #3, item 1: reserving per chunk let a failing chunk make 4 calls against 1 reserved. Now a refused reservation stops the chunk (a `NonRetryableError`) and every later chunk is a budget gap. Each retry also uses the next seed, since a retry at temperature 0 with the same seed would most likely repeat a malformed answer. |
+| 3 | Every chunk goes to the model | A chunk with no added line isn't sent | Unchanged context can only give pre-existing suggestions, so it costs a call and can't change the verdict. Nothing the change adds goes unread. |
+| 4 | `verify` is a separate step | Verification runs inside each `detect` step | It's pure and deterministic, so it doesn't need its own retry; the step's event records what was dropped. |
+| 5 | `apply-exceptions` step | Not yet | There's no exceptions table until 3-C, which adds the step. |
+| 6 | Eval calls `POST /api/eval/review` | `POST /api/eval/detect` runs only the AI detector; the runner adds the rules locally | Rules don't need the network, and the runner then uses the exact same `review()` as the unit tests. |
+| 7 | Challenges | One challenge per finding (`409` after that), **only by the review's author or an approver** (`403` otherwise) | One outcome per finding keeps the audit simple. Review of PR #3, item 3: without the ownership check anyone could use up the author's one challenge with a junk argument. |
+| 8 | — | `LLM_MODE=fake`: a deterministic stand-in model, and `LOCAL_ONLY=1` to turn off remote bindings | CI has no Cloudflare account, and the smoke test should cost nothing. The fake model also exercises verification (it invents one quote) and failures. The fake model counts against the budget like the real one, so the budget path is tested too. |
+| 9 | — | AI SEC-001 findings whose quoted values are all placeholders are dropped | The first real eval run flagged `"<your-key-here>"` and `"****"` as secrets: two false blockers. The rule already defines placeholders; the AI path now uses the same definition. |
+
+| 10 | §10 rate limits: one limit for the API | `GET /api/reviews/:id` has its own limiter (`RL_POLL`, 150 a minute per IP) | Review of PR #3, item 2: the UI polls a running review (every 2 s), which would hit the 60-a-minute API limit with two tabs or two people behind one NAT. The client also waits for `Retry-After` on a 429 and keeps polling through transient errors. |
+| 11 | Code between fixed `BEGIN CODE` / `END CODE` markers | A random 16-hex-digit tag per request on every marker (prompt `v3`), never one that occurs in the code | Review of PR #3, item 4: code containing `END CODE` and new instructions could close the block early. Eval case `adversarial-injection-breakout` (hard gate) tries exactly that. |
+| 12 | Findings capped at 200 in `finalize` | Also capped inside the `rules` step, and rule evidence is clipped to 500 characters | Review of PR #3, item 5: a 99 KB input of TODOs gave 4,000 findings and a 1.9 MB step output, over the 1 MiB limit on deployed Workflows. Local dev doesn't enforce that limit, so this needs checking on the first deploy. |
+
+**Budget caps against the free allocation.** At the design's prices a call costs about 300 neurons, so the
+10,000-neuron free allocation is about 33 calls a day. The two caps add up to 45. They are a ceiling on what the
+app will try, not a guarantee that the allocation holds: on the Free plan a call past the allocation fails (no
+charge), and the review shows that chunk as a coverage gap.
+
+**The challenge outcome is easy to steer.** "Disputed" comes from a model reading the developer's own argument,
+so a persuasive argument can dispute a correct finding. It never changes the verdict. When the 3-C dashboard
+counts disputes, it must show them as *disputed by the author*, not as confirmed false positives.
+
+**Open for 3-C: the eval plan doesn't fit the free allocation.** §8 plans 4 configurations × 3 runs × about 24
+cases, roughly 300 calls, and one full `llm` run already uses 22 of the day's 40 or so. Options: spread the runs
+over several days; run the `small` config on Llama 3.1 8B (about a sixth of the neurons per call); cut to 2
+configurations × 3 runs; or use a paid account for the eval. Decision (prompt 8): leave it for now and revisit once
+there is usage data from Cloudflare or errors start to appear.

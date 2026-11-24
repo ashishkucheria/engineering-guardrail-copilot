@@ -1,0 +1,13 @@
+{
+  "id": "sec-002-parameterised-clean",
+  "description": "Looks risky (SQL and a request value) but uses a bound parameter.",
+  "tags": [
+    "llm",
+    "clean"
+  ],
+  "input": "export async function findUser(db, req) {\n  const email = req.query.email;\n  return db.prepare(\"SELECT id, name FROM users WHERE email = ?\").bind(email).first();\n}\n",
+  "expected": [],
+  "must_not_flag": [
+    "SEC-002"
+  ]
+}

@@ -1,10 +1,12 @@
 export class ApiError extends Error {
   readonly status: number;
   readonly code: string;
-  constructor(status: number, code: string, message: string) {
+  readonly headers: Record<string, string>;
+  constructor(status: number, code: string, message: string, headers: Record<string, string> = {}) {
     super(message);
     this.status = status;
     this.code = code;
+    this.headers = headers;
   }
 }
 
@@ -16,7 +18,7 @@ export function json(data: unknown, status = 200, headers: HeadersInit = {}): Re
 }
 
 export function errorResponse(err: ApiError): Response {
-  return json({ error: { code: err.code, message: err.message } }, err.status);
+  return json({ error: { code: err.code, message: err.message } }, err.status, err.headers);
 }
 
 /** Read a JSON object body with a size cap. The cap is checked on the bytes, not on Content-Length. */

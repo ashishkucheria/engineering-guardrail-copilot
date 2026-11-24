@@ -1,17 +1,24 @@
 // Typed client for the Worker API. The response types are the Worker's own types, so a contract
 // change breaks the build instead of the page.
-import type { FindingView, ReviewDetail, ReviewSummary, StandardChange, StandardView } from "../core/api-types.ts";
+import type { ChallengeResult, FindingView, MetaView, ReviewDetail, ReviewSummary, StandardChange, StandardView } from "../core/api-types.ts";
 import type { User } from "../core/types.ts";
 
-export type { FindingView, ReviewDetail, ReviewSummary, StandardChange, StandardView, User };
+export type { ChallengeResult, FindingView, MetaView, ReviewDetail, ReviewSummary, StandardChange, StandardView, User };
 
 export class ApiFailure extends Error {
   readonly status: number;
   readonly code: string;
-  constructor(status: number, code: string, message: string) {
+  /** Seconds, from the Retry-After header of a 429 or 503. */
+  readonly retryAfter: number | null;
+  constructor(status: number, code: string, message: string, retryAfter: number | null = null) {
     super(message);
     this.status = status;
     this.code = code;
+    this.retryAfter = retryAfter;
+  }
+  /** Worth retrying: the network, rate limits and server-side failures. */
+  get transient(): boolean {
+    return this.status === 0 || this.status === 429 || this.status >= 500;
   }
 }
 
@@ -31,7 +38,10 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
     throw new ApiFailure(0, "network", "Could not reach the server.");
   }
   const data = (await res.json().catch(() => null)) as { error?: { code: string; message: string } } | null;
-  if (!res.ok) throw new ApiFailure(res.status, data?.error?.code ?? "http_error", data?.error?.message ?? `Request failed (${res.status}).`);
+  if (!res.ok) {
+    const retryAfter = Number(res.headers.get("retry-after"));
+    throw new ApiFailure(res.status, data?.error?.code ?? "http_error", data?.error?.message ?? `Request failed (${res.status}).`, Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : null);
+  }
   return data as T;
 }
 
@@ -40,7 +50,9 @@ export const api = {
   standards: () => call<StandardView[]>("GET", "/api/standards"),
   standardChanges: (id: string) => call<StandardChange[]>("GET", `/api/standards/${encodeURIComponent(id)}/changes`),
   setStandardEnabled: (id: string, enabled: boolean) => call<StandardView>("PATCH", `/api/standards/${encodeURIComponent(id)}`, { enabled }),
-  createReview: (input: string) => call<ReviewDetail>("POST", "/api/reviews", { input }),
+  meta: () => call<MetaView>("GET", "/api/meta"),
+  createReview: (input: string) => call<{ id: string; status: string }>("POST", "/api/reviews", { input }),
+  challenge: (findingId: string, argument: string) => call<ChallengeResult>("POST", `/api/findings/${encodeURIComponent(findingId)}/challenge`, { argument }),
   reviews: () => call<ReviewSummary[]>("GET", "/api/reviews"),
   review: (id: string) => call<ReviewDetail>("GET", `/api/reviews/${encodeURIComponent(id)}`),
 };

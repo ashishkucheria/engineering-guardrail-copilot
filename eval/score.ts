@@ -22,6 +22,8 @@ export interface EvalCase {
   /** Standards that must produce no violation in this case (a labelled clean area). */
   must_not_flag?: string[];
   tags?: string[];
+  /** A hard gate fails the whole eval run if it misses an expected finding or breaks must_not_flag. */
+  hard_gate?: boolean;
 }
 
 export interface CaseScore {
@@ -35,6 +37,8 @@ export interface CaseScore {
   falsePositives: Pick<Finding, "standardId" | "file" | "lineStart" | "lineEnd" | "evidence">[];
   missed: ExpectedFinding[];
   mustNotFlagViolated: string[];
+  /** Violations of blocker standards: they stop a change, so their precision is reported on its own. */
+  blocker: { tp: number; fp: number };
 }
 
 export function scoreCase(c: EvalCase, predicted: Finding[], inScope: Set<string>): CaseScore {
@@ -47,6 +51,7 @@ export function scoreCase(c: EvalCase, predicted: Finding[], inScope: Set<string
 
   const matched = new Set<number>();
   const falsePositives: CaseScore["falsePositives"] = [];
+  const blocker = { tp: 0, fp: 0 };
   for (const f of violations) {
     const i = expected.findIndex(
       (e, idx) =>
@@ -56,6 +61,7 @@ export function scoreCase(c: EvalCase, predicted: Finding[], inScope: Set<string
         f.lineStart <= e.lines[1] + LINE_TOLERANCE &&
         f.lineEnd >= e.lines[0] - LINE_TOLERANCE,
     );
+    if (f.severity === "blocker") blocker[i >= 0 ? "tp" : "fp"]++;
     if (i >= 0) {
       matched.add(i);
       bump(f.standardId, "tp");
@@ -79,6 +85,7 @@ export function scoreCase(c: EvalCase, predicted: Finding[], inScope: Set<string
     falsePositives,
     missed,
     mustNotFlagViolated,
+    blocker,
   };
 }
 
@@ -104,6 +111,10 @@ export interface Summary {
   /** Cases labelled with no findings: how many produced any in-scope violation. */
   cleanCases: { total: number; withFalsePositive: number };
   mustNotFlagFailures: { caseId: string; standards: string[] }[];
+  /** Precision over blocker violations only (design §8, review of PR #1 item 5). */
+  blockerPrecision: { tp: number; fp: number; precision: number | null };
+  /** Hard-gate cases in scope, and the ones that failed. */
+  hardGates: { total: number; failed: string[] };
 }
 
 export function summarize(cases: EvalCase[], scores: CaseScore[], inScope: Set<string>): Summary {
@@ -126,5 +137,19 @@ export function summarize(cases: EvalCase[], scores: CaseScore[], inScope: Set<s
     byStandard,
     cleanCases: { total: clean.length, withFalsePositive: clean.filter((c) => (scores.find((s) => s.caseId === c.id)?.fp ?? 0) > 0).length },
     mustNotFlagFailures: scores.filter((s) => s.mustNotFlagViolated.length).map((s) => ({ caseId: s.caseId, standards: s.mustNotFlagViolated })),
+    blockerPrecision: (() => {
+      const tp = scores.reduce((n, s) => n + s.blocker.tp, 0);
+      const fp = scores.reduce((n, s) => n + s.blocker.fp, 0);
+      return { tp, fp, precision: tp + fp === 0 ? null : tp / (tp + fp) };
+    })(),
+    hardGates: (() => {
+      // A gate is in scope when this config can detect at least one of its expected standards.
+      const gates = cases.filter((c) => c.hard_gate && c.expected.some((e) => inScope.has(e.standard_id)));
+      const failed = gates.filter((c) => {
+        const s = scores.find((x) => x.caseId === c.id);
+        return !s || s.fn > 0 || s.mustNotFlagViolated.length > 0;
+      });
+      return { total: gates.length, failed: failed.map((c) => c.id) };
+    })(),
   };
 }

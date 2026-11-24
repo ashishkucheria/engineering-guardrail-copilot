@@ -70,6 +70,11 @@ export interface Finding {
   explanation: string;
   impact: string;
   remediation: string;
+  /**
+   * AI finding whose evidence lies only on unchanged context lines of a diff: always a suggestion,
+   * labelled "pre-existing", so a change can't fail for code it didn't touch (design §6).
+   */
+  preExisting?: boolean;
 }
 
 export interface User {
