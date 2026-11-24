@@ -3,6 +3,7 @@
 // (parseInput, runRules, the LLM detector's chunks) and then the same `finalize()`, so what the eval
 // measures is what the app runs.
 import { parseInput } from "./diff.ts";
+import { applyExceptions, type ActiveException } from "./exceptions.ts";
 import { runRules } from "./rules.ts";
 import { computeVerdict } from "./verdict.ts";
 import type { Coverage, Finding, ParsedInput, Standard, Verdict } from "./types.ts";
@@ -51,10 +52,16 @@ export async function review(raw: string, standards: Standard[], detectors: Dete
 export const MAX_FINDINGS = 200;
 
 /**
- * The last step for every path: de-duplicate, order, cap, and compute the verdict from what's left.
- * Dropping findings over the cap is recorded in coverage, so the verdict can't be `pass`.
+ * The last step for every path: de-duplicate, order, cap, apply active exceptions, and compute the
+ * verdict from what's left. Dropping findings over the cap is recorded in coverage, so the verdict
+ * can't be `pass`. Exceptions are the only input that can waive a finding; feedback isn't one.
  */
-export function finalize(input: ParsedInput, all: Finding[], extraSkipped: Coverage["skipped"]): { findings: Finding[]; coverage: Coverage; verdict: Verdict } {
+export function finalize(
+  input: ParsedInput,
+  all: Finding[],
+  extraSkipped: Coverage["skipped"],
+  exceptions: ActiveException[] = [],
+): { findings: Finding[]; coverage: Coverage; verdict: Verdict } {
   const coverage: Coverage = { ...input.coverage, skipped: [...input.coverage.skipped, ...extraSkipped] };
   let findings = dedupe(all).sort(
     (a, b) =>
@@ -66,7 +73,7 @@ export function finalize(input: ParsedInput, all: Finding[], extraSkipped: Cover
   );
   const capped = capFindings(findings);
   if (capped.dropped > 0) coverage.skipped.push(capGap(capped.dropped));
-  findings = capped.findings;
+  findings = applyExceptions(capped.findings, exceptions);
   return { findings, coverage, verdict: computeVerdict(findings, coverage) };
 }
 

@@ -1,6 +1,19 @@
 // D1 access. All SQL lives here, always with bound parameters.
 import type { Coverage, Finding, Standard, StandardSnapshot, User, Verdict } from "../core/types.ts";
-import type { FindingView, ReviewDetail, ReviewSummary, SnapshotEntry, StandardChange, StandardView } from "../core/api-types.ts";
+import type {
+  ChatMessageView,
+  DashboardView,
+  ExceptionView,
+  FindingView,
+  Ref,
+  ReviewDetail,
+  ReviewSummary,
+  SnapshotEntry,
+  StandardChange,
+  StandardHistoryView,
+  StandardView,
+} from "../core/api-types.ts";
+import { isActive, type ActiveException } from "../core/exceptions.ts";
 
 export type { ReviewDetail, ReviewSummary, SnapshotEntry, StandardChange, StandardView };
 
@@ -165,10 +178,10 @@ export async function completeReview(
   const stmts: D1PreparedStatement[] = r.findings.map((f, i) =>
     db
       .prepare(
-        `INSERT OR IGNORE INTO findings (id, review_id, standard_id, standard_hash, classification, severity, source, file, line_start, line_end, evidence, explanation, impact, remediation, pre_existing, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT OR IGNORE INTO findings (id, review_id, standard_id, standard_hash, classification, severity, source, file, line_start, line_end, evidence, explanation, impact, remediation, pre_existing, waived_by_exception, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .bind(findingId(id, i), id, f.standardId, f.standardHash, f.classification, f.severity, f.source, f.file, f.lineStart, f.lineEnd, f.evidence, f.explanation, f.impact, f.remediation, f.preExisting ? 1 : 0, r.completedAt),
+      .bind(findingId(id, i), id, f.standardId, f.standardHash, f.classification, f.severity, f.source, f.file, f.lineStart, f.lineEnd, f.evidence, f.explanation, f.impact, f.remediation, f.preExisting ? 1 : 0, f.waivedBy ?? null, r.completedAt),
   );
   stmts.push(
     db
@@ -315,7 +328,7 @@ export async function listReviews(db: D1Database, limit: number): Promise<Review
 
 
 
-export async function getReview(db: D1Database, id: string): Promise<Omit<ReviewDetail, "viewerCanChallenge"> | null> {
+export async function getReview(db: D1Database, id: string): Promise<Omit<ReviewDetail, "viewerCanChallenge" | "viewerCanGiveFeedback"> | null> {
   const r = await db
     .prepare(`SELECT r.*, u.name AS author_name FROM reviews r JOIN users u ON u.id = r.author_id WHERE r.id = ?`)
     .bind(id)
@@ -328,7 +341,7 @@ export async function getReview(db: D1Database, id: string): Promise<Omit<Review
 
   // Only the versions this review ran against: the snapshot's (id, hash) pairs, passed as one JSON
   // parameter (no per-standard placeholders, so no bound-parameter limit as standards grow).
-  const [versions, current, findings, events, challenges] = await db.batch([
+  const [versions, current, findings, events, challenges, messages] = await db.batch([
     db
       .prepare(
         `SELECT v.standard_id, v.content_hash, v.title, v.rule FROM standard_versions v
@@ -336,7 +349,17 @@ export async function getReview(db: D1Database, id: string): Promise<Omit<Review
       )
       .bind(r.standards_snapshot),
     db.prepare("SELECT id, content_hash, enabled, retired_at FROM standards"),
-    db.prepare("SELECT * FROM findings WHERE review_id = ? ORDER BY file, line_start, standard_id").bind(id),
+    db
+      .prepare(
+        `SELECT f.*, w.path_pattern AS w_pattern, w.expires_at AS w_expires, w.decided_by AS w_by, wu.name AS w_by_name,
+                (SELECT x.id FROM exceptions x WHERE x.source_finding = f.id ORDER BY x.created_at DESC, x.id LIMIT 1) AS req_id,
+                (SELECT x.status FROM exceptions x WHERE x.source_finding = f.id ORDER BY x.created_at DESC, x.id LIMIT 1) AS req_status
+         FROM findings f
+         LEFT JOIN exceptions w ON w.id = f.waived_by_exception
+         LEFT JOIN users wu ON wu.id = w.decided_by
+         WHERE f.review_id = ? ORDER BY f.file, f.line_start, f.standard_id, f.id`,
+      )
+      .bind(id),
     db.prepare("SELECT step, outcome, duration_ms, detail, at FROM review_events WHERE review_id = ? ORDER BY id").bind(id),
     db
       .prepare(
@@ -345,6 +368,7 @@ export async function getReview(db: D1Database, id: string): Promise<Omit<Review
          WHERE fb.action = 'challenge' AND fb.finding_id IN (SELECT id FROM findings WHERE review_id = ?)`,
       )
       .bind(id),
+    chatSelect(db, id),
   ]);
   const challengeOf = new Map(
     (challenges!.results as { finding_id: string; reason: string; llm_assessment: string | null; created_at: string; user_id: string; user_name: string }[]).map((c) => {
@@ -402,7 +426,20 @@ export async function getReview(db: D1Database, id: string): Promise<Omit<Review
       preExisting: f.pre_existing === 1,
       challengeOutcome: (f.challenge_outcome as FindingView["challengeOutcome"]) ?? null,
       challenge: challengeOf.get(f.id as string) ?? null,
+      disposition: f.disposition as FindingView["disposition"],
+      waivedBy: (f.waived_by_exception as string | null) ?? null,
+      waiver: f.waived_by_exception
+        ? {
+            id: f.waived_by_exception as string,
+            pathPattern: f.w_pattern as string,
+            decidedBy: f.w_by ? { id: f.w_by as string, name: (f.w_by_name as string) ?? (f.w_by as string) } : null,
+            expiresAt: f.w_expires as string,
+          }
+        : null,
+      exceptionRequest: f.req_id ? { id: f.req_id as string, status: f.req_status as ExceptionView["status"] } : null,
     })),
+    history: await standardHistory(db, id),
+    messages: (messages!.results as ChatRow[]).map(toChatMessage),
     events: (events!.results as { step: string; outcome: string; duration_ms: number | null; detail: string | null; at: string }[]).map((e) => ({
       step: e.step,
       outcome: e.outcome,
@@ -410,5 +447,329 @@ export async function getReview(db: D1Database, id: string): Promise<Omit<Review
       detail: e.detail,
       at: e.at,
     })),
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Feedback (accept / reject)
+
+/**
+ * Set the latest disposition and append the feedback row in one transaction. The finding's own
+ * fields and the review's verdict are never touched: feedback is a signal, not a waiver.
+ */
+export async function recordFeedback(
+  db: D1Database,
+  f: { findingId: string; userId: string; action: "accept" | "reject"; reason: string | null; at: string },
+): Promise<void> {
+  await db.batch([
+    db.prepare("UPDATE findings SET disposition = ? WHERE id = ?").bind(f.action === "accept" ? "accepted" : "rejected", f.findingId),
+    db.prepare("INSERT INTO feedback (finding_id, user_id, action, reason, created_at) VALUES (?, ?, ?, ?, ?)").bind(f.findingId, f.userId, f.action, f.reason, f.at),
+  ]);
+}
+
+/**
+ * How each standard with findings in this review fared in OTHER reviews: counts of accepted,
+ * rejected and disputed findings, and the three latest rejection reasons. For people (the panel
+ * next to a finding, chat, the dashboard) only; detection never reads it (design §6).
+ */
+export async function standardHistory(db: D1Database, reviewId: string): Promise<StandardHistoryView[]> {
+  const [counts, reasons] = await db.batch([
+    db
+      .prepare(
+        `SELECT f.standard_id,
+                COALESCE(SUM(f.disposition = 'accepted'), 0) AS accepted,
+                COALESCE(SUM(f.disposition = 'rejected'), 0) AS rejected,
+                COALESCE(SUM(f.challenge_outcome = 'disputed'), 0) AS disputed
+         FROM findings f
+         WHERE f.review_id <> ?1 AND f.standard_id IN (SELECT standard_id FROM findings WHERE review_id = ?1)
+         GROUP BY f.standard_id`,
+      )
+      .bind(reviewId),
+    db
+      .prepare(
+        `SELECT standard_id, reason, user_id, user_name, created_at FROM (
+           SELECT f.standard_id, fb.reason, fb.user_id, u.name AS user_name, fb.created_at,
+                  ROW_NUMBER() OVER (PARTITION BY f.standard_id ORDER BY fb.created_at DESC, fb.id DESC) AS rn
+           FROM feedback fb JOIN findings f ON f.id = fb.finding_id JOIN users u ON u.id = fb.user_id
+           WHERE fb.action = 'reject' AND f.review_id <> ?1 AND f.standard_id IN (SELECT standard_id FROM findings WHERE review_id = ?1)
+         ) WHERE rn <= 3 ORDER BY standard_id, created_at DESC`,
+      )
+      .bind(reviewId),
+  ]);
+  const byStd = new Map<string, StandardHistoryView>();
+  for (const c of counts!.results as { standard_id: string; accepted: number; rejected: number; disputed: number }[]) {
+    byStd.set(c.standard_id, { standardId: c.standard_id, accepted: c.accepted, rejected: c.rejected, disputed: c.disputed, recentReasons: [] });
+  }
+  for (const r of reasons!.results as { standard_id: string; reason: string; user_id: string; user_name: string; created_at: string }[]) {
+    byStd.get(r.standard_id)?.recentReasons.push({ reason: r.reason, by: { id: r.user_id, name: r.user_name }, at: r.created_at });
+  }
+  return [...byStd.values()].sort((a, b) => a.standardId.localeCompare(b.standardId));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Exceptions
+
+interface ExceptionRow {
+  id: string;
+  standard_id: string;
+  standard_title: string | null;
+  path_pattern: string;
+  justification: string;
+  source_finding: string | null;
+  sf_review: string | null;
+  sf_file: string | null;
+  sf_line: number | null;
+  requested_by: string;
+  requested_by_name: string;
+  status: ExceptionView["status"];
+  decided_by: string | null;
+  decided_by_name: string | null;
+  decision_note: string | null;
+  expires_at: string;
+  created_at: string;
+  decided_at: string | null;
+}
+
+const EXCEPTION_SELECT = `
+  SELECT e.*, s.title AS standard_title, rq.name AS requested_by_name, dc.name AS decided_by_name,
+         sf.review_id AS sf_review, sf.file AS sf_file, sf.line_start AS sf_line
+  FROM exceptions e
+  JOIN users rq ON rq.id = e.requested_by
+  LEFT JOIN users dc ON dc.id = e.decided_by
+  LEFT JOIN standards s ON s.id = e.standard_id
+  LEFT JOIN findings sf ON sf.id = e.source_finding`;
+
+function toException(r: ExceptionRow, now: Date): ExceptionView {
+  const state = r.status === "approved" ? (isActive({ status: r.status, expiresAt: r.expires_at }, now) ? "active" : "expired") : r.status;
+  return {
+    id: r.id,
+    standardId: r.standard_id,
+    standardTitle: r.standard_title,
+    pathPattern: r.path_pattern,
+    justification: r.justification,
+    sourceFinding: r.source_finding ? { id: r.source_finding, reviewId: r.sf_review!, file: r.sf_file!, lineStart: r.sf_line! } : null,
+    requestedBy: { id: r.requested_by, name: r.requested_by_name },
+    status: r.status,
+    state,
+    decidedBy: r.decided_by ? { id: r.decided_by, name: r.decided_by_name ?? r.decided_by } : null,
+    decisionNote: r.decision_note,
+    expiresAt: r.expires_at,
+    createdAt: r.created_at,
+    decidedAt: r.decided_at,
+  };
+}
+
+export async function insertException(
+  db: D1Database,
+  e: { id: string; standardId: string; pathPattern: string; justification: string; sourceFinding: string | null; requestedBy: string; expiresAt: string; createdAt: string },
+): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO exceptions (id, standard_id, path_pattern, justification, source_finding, requested_by, status, expires_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+    )
+    .bind(e.id, e.standardId, e.pathPattern, e.justification, e.sourceFinding, e.requestedBy, e.expiresAt, e.createdAt)
+    .run();
+}
+
+export async function getException(db: D1Database, id: string, now: Date): Promise<ExceptionView | null> {
+  const r = await db.prepare(`${EXCEPTION_SELECT} WHERE e.id = ?`).bind(id).first<ExceptionRow>();
+  return r ? toException(r, now) : null;
+}
+
+export async function hasPendingExceptionFor(db: D1Database, findingId: string): Promise<boolean> {
+  return !!(await db.prepare("SELECT 1 AS x FROM exceptions WHERE source_finding = ? AND status = 'pending'").bind(findingId).first());
+}
+
+/** `state` filters on the derived state; active and expired are computed against `now`. */
+export async function listExceptions(db: D1Database, state: ExceptionView["state"] | null, now: Date, limit = 100): Promise<ExceptionView[]> {
+  const where = {
+    pending: "e.status = 'pending'",
+    denied: "e.status = 'denied'",
+    active: "e.status = 'approved' AND e.expires_at > ?1",
+    expired: "e.status = 'approved' AND e.expires_at <= ?1",
+  } as const;
+  const sql = `${EXCEPTION_SELECT} WHERE ${state ? where[state] : "?1 = ?1"} ORDER BY e.created_at DESC, e.id LIMIT ?2`;
+  return (await db.prepare(sql).bind(now.toISOString(), limit).all<ExceptionRow>()).results.map((r) => toException(r, now));
+}
+
+/** Active exceptions for the review pipeline's waiver step (design §5, load-context). */
+export async function listActiveExceptions(db: D1Database, now: Date): Promise<ActiveException[]> {
+  const rows = await db
+    .prepare("SELECT id, standard_id, path_pattern FROM exceptions WHERE status = 'approved' AND expires_at > ? ORDER BY decided_at, id")
+    .bind(now.toISOString())
+    .all<{ id: string; standard_id: string; path_pattern: string }>();
+  return rows.results.map((r) => ({ id: r.id, standardId: r.standard_id, pathPattern: r.path_pattern }));
+}
+
+/** Findings of one review, for deciding which ones an approved exception waives. */
+export async function findingsForWaiver(db: D1Database, reviewId: string): Promise<{ id: string; standardId: string; file: string; waivedBy: string | null }[]> {
+  const rows = await db
+    .prepare("SELECT id, standard_id, file, waived_by_exception FROM findings WHERE review_id = ?")
+    .bind(reviewId)
+    .all<{ id: string; standard_id: string; file: string; waived_by_exception: string | null }>();
+  return rows.results.map((r) => ({ id: r.id, standardId: r.standard_id, file: r.file, waivedBy: r.waived_by_exception }));
+}
+
+/**
+ * The verdict recomputed in SQL from the stored findings, so approving an exception updates it
+ * atomically even when two exceptions for one review are approved at once. Mirrors
+ * core/verdict.ts computeVerdict: waived findings don't count; coverage gaps make it incomplete.
+ */
+const RECOMPUTED_VERDICT = `CASE
+  WHEN EXISTS (SELECT 1 FROM findings v WHERE v.review_id = reviews.id AND v.classification = 'violation' AND v.waived_by_exception IS NULL AND v.severity = 'blocker') THEN 'fail'
+  WHEN json_array_length(reviews.coverage, '$.skipped') > 0 THEN 'incomplete'
+  WHEN EXISTS (SELECT 1 FROM findings v WHERE v.review_id = reviews.id AND v.classification = 'violation' AND v.waived_by_exception IS NULL) THEN 'warn'
+  ELSE 'pass' END`;
+
+/**
+ * Decide a pending exception in one transaction. The status update is conditional on it still being
+ * pending (and, for an approval, unexpired), so a concurrent decision can't overwrite this one.
+ * Every later statement checks that THIS call made the decision (same decider and timestamp), so
+ * if it lost the race nothing else is written.
+ *
+ * An approval also waives the matching findings of the review the request came from
+ * (`waive.findingIds`), recomputes that review's verdict and records a review event (prompt 10).
+ * Returns whether this call made the decision.
+ */
+export async function decideException(
+  db: D1Database,
+  d: {
+    id: string;
+    decision: "approved" | "denied";
+    by: Ref;
+    note: string | null;
+    at: string;
+    waive: { reviewId: string; findingIds: string[] } | null;
+  },
+): Promise<boolean> {
+  const madeHere = "EXISTS (SELECT 1 FROM exceptions WHERE id = ?1 AND status = 'approved' AND decided_by = ?2 AND decided_at = ?3)";
+  const stmts: D1PreparedStatement[] = [
+    db
+      .prepare("UPDATE exceptions SET status = ?2, decided_by = ?3, decided_at = ?4, decision_note = ?5 WHERE id = ?1 AND status = 'pending' AND (?2 = 'denied' OR expires_at > ?4)")
+      .bind(d.id, d.decision, d.by.id, d.at, d.note),
+  ];
+  if (d.decision === "approved" && d.waive) {
+    const { reviewId, findingIds } = d.waive;
+    stmts.push(
+      db
+        .prepare(`UPDATE findings SET waived_by_exception = ?1 WHERE review_id = ?4 AND waived_by_exception IS NULL AND id IN (SELECT value FROM json_each(?5)) AND ${madeHere}`)
+        .bind(d.id, d.by.id, d.at, reviewId, JSON.stringify(findingIds)),
+      db.prepare(`UPDATE reviews SET verdict = ${RECOMPUTED_VERDICT} WHERE id = ?4 AND status = 'complete' AND ${madeHere}`).bind(d.id, d.by.id, d.at, reviewId),
+      db
+        .prepare(
+          `INSERT INTO review_events (review_id, step, outcome, duration_ms, detail, at)
+           SELECT id, 'exception', 'ok', NULL,
+                  'Exception ' || ?1 || ' approved by ' || ?5 || ': ' ||
+                  (SELECT COUNT(*) FROM findings WHERE review_id = ?4 AND waived_by_exception = ?1) || ' finding(s) waived; verdict now ' || verdict,
+                  ?3
+           FROM reviews WHERE id = ?4 AND status = 'complete' AND ${madeHere}`,
+        )
+        .bind(d.id, d.by.id, d.at, reviewId, d.by.name),
+    );
+  }
+  const [update] = await db.batch(stmts);
+  return (update?.meta.changes ?? 0) === 1;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Chat
+
+interface ChatRow {
+  id: number;
+  role: "user" | "assistant";
+  user_id: string | null;
+  user_name: string | null;
+  content: string;
+  created_at: string;
+}
+
+const MAX_CHAT_SHOWN = 50;
+
+function chatSelect(db: D1Database, reviewId: string): D1PreparedStatement {
+  return db
+    .prepare(
+      `SELECT * FROM (
+         SELECT m.id, m.role, m.user_id, u.name AS user_name, m.content, m.created_at
+         FROM chat_messages m LEFT JOIN users u ON u.id = m.user_id WHERE m.review_id = ? ORDER BY m.id DESC LIMIT ?
+       ) ORDER BY id`,
+    )
+    .bind(reviewId, MAX_CHAT_SHOWN);
+}
+
+const toChatMessage = (r: ChatRow): ChatMessageView => ({
+  id: r.id,
+  role: r.role,
+  user: r.user_id ? { id: r.user_id, name: r.user_name ?? r.user_id } : null,
+  content: r.content,
+  createdAt: r.created_at,
+});
+
+export async function listChat(db: D1Database, reviewId: string): Promise<ChatMessageView[]> {
+  return (await chatSelect(db, reviewId).all<ChatRow>()).results.map(toChatMessage);
+}
+
+/** The question and the answer are stored together, only after the model answered. */
+export async function appendChat(db: D1Database, c: { reviewId: string; userId: string; question: string; reply: string; at: string }): Promise<void> {
+  await db.batch([
+    db.prepare("INSERT INTO chat_messages (review_id, user_id, role, content, created_at) VALUES (?, ?, 'user', ?, ?)").bind(c.reviewId, c.userId, c.question, c.at),
+    db.prepare("INSERT INTO chat_messages (review_id, user_id, role, content, created_at) VALUES (?, NULL, 'assistant', ?, ?)").bind(c.reviewId, c.reply, c.at),
+  ]);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Dashboard (design §7)
+
+export async function dashboard(db: D1Database, now: Date): Promise<Omit<DashboardView, "budget">> {
+  const [total, verdicts, f, top, rates, ex] = await db.batch([
+    db.prepare("SELECT COUNT(*) AS n FROM reviews"),
+    db.prepare("SELECT verdict, COUNT(*) AS n FROM reviews WHERE status = 'complete' GROUP BY verdict"),
+    db.prepare(
+      `SELECT
+         COALESCE(SUM(classification = 'violation' AND waived_by_exception IS NULL AND severity = 'blocker'), 0) AS blocker,
+         COALESCE(SUM(classification = 'violation' AND waived_by_exception IS NULL AND severity = 'major'), 0) AS major,
+         COALESCE(SUM(classification = 'violation' AND waived_by_exception IS NULL AND severity = 'minor'), 0) AS minor,
+         COALESCE(SUM(classification = 'suggestion'), 0) AS suggestions,
+         COALESCE(SUM(waived_by_exception IS NOT NULL), 0) AS waived,
+         COALESCE(SUM(disposition = 'open'), 0) AS open,
+         COALESCE(SUM(disposition = 'accepted'), 0) AS accepted,
+         COALESCE(SUM(disposition = 'rejected'), 0) AS rejected,
+         COALESCE(SUM(challenge_outcome = 'upheld'), 0) AS upheld,
+         COALESCE(SUM(challenge_outcome = 'disputed'), 0) AS disputed
+       FROM findings`,
+    ),
+    db.prepare(
+      `SELECT f.standard_id AS id, s.title, COUNT(*) AS count FROM findings f LEFT JOIN standards s ON s.id = f.standard_id
+       GROUP BY f.standard_id ORDER BY count DESC, f.standard_id LIMIT 5`,
+    ),
+    db.prepare(
+      `SELECT standard_id AS id, SUM(disposition = 'rejected') AS rejected, SUM(disposition IN ('accepted', 'rejected')) AS n
+       FROM findings GROUP BY standard_id HAVING n > 0 ORDER BY standard_id`,
+    ),
+    db
+      .prepare(
+        `SELECT COALESCE(SUM(status = 'pending'), 0) AS pending,
+                COALESCE(SUM(status = 'approved' AND expires_at > ?1), 0) AS active,
+                COALESCE(SUM(status = 'approved' AND expires_at <= ?1), 0) AS expired,
+                COALESCE(SUM(status = 'denied'), 0) AS denied
+         FROM exceptions`,
+      )
+      .bind(now.toISOString()),
+  ]);
+  const v: Record<string, number> = { pass: 0, warn: 0, fail: 0, incomplete: 0 };
+  for (const r of verdicts!.results as { verdict: string; n: number }[]) if (r.verdict in v) v[r.verdict] = r.n;
+  const s = f!.results[0] as Record<string, number>;
+  const e = ex!.results[0] as Record<string, number>;
+  return {
+    totalReviews: (total!.results[0] as { n: number }).n,
+    verdicts: v as DashboardView["verdicts"],
+    violationsBySeverity: { blocker: s.blocker!, major: s.major!, minor: s.minor! },
+    suggestions: s.suggestions!,
+    waived: s.waived!,
+    topStandards: top!.results as DashboardView["topStandards"],
+    dispositions: { open: s.open!, accepted: s.accepted!, rejected: s.rejected! },
+    rejectRateByStandard: (rates!.results as { id: string; rejected: number; n: number }[]).map((r) => ({ id: r.id, rate: r.rejected / r.n, n: r.n })),
+    challenges: { upheld: s.upheld!, disputed: s.disputed! },
+    exceptions: { pending: e.pending!, active: e.active!, expired: e.expired!, denied: e.denied! },
   };
 }

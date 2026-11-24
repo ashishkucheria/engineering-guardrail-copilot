@@ -433,3 +433,52 @@ Dont spread it - we will look at it once we get some data from cloudflare or som
 - Rule findings are capped inside the Workflow step.
 
 The eval-budget question stays open until there is usage data.
+
+---
+
+## 9. Approving PR #3
+
+**Intent:** Approve the 3-B review fixes and have PR #3 merged to master.
+
+```text
+Approved, merge it
+```
+
+**Outcome:** PR #3 was merged to master with a merge commit after CI passed on its head commit. This entry is
+recorded on the 3-C branch, so nothing went to master outside a PR.
+
+---
+
+## 10. Starting 3-C
+
+**Intent:** Start PR 3-C (interaction and insight), as planned in the design.
+
+```text
+Start 3-C
+```
+
+Before building, the assistant asked three design questions. I picked one option each (option labels as shown):
+
+```text
+3-C needs eval/RESULTS.md comparing at least 2 configurations. The eval budget is 25 calls a day and one full AI run uses about 24. Which comparison should 3-C ship?
+→ Rules vs rules+AI (Recommended)
+
+When an approver approves an exception requested from a finding, what should happen to the review that finding came from?
+→ Waive it and recompute (Recommended)
+
+Who may accept or reject a finding?
+→ Author or approver (Recommended)
+```
+
+**Outcome:** PR 3-C added:
+- exceptions with every approval rule;
+- accept/reject feedback, limited to the author or an approver;
+- history next to findings and in chat;
+- an advisory chat about each review;
+- a dashboard read live from D1;
+- `eval/RESULTS.md`, comparing rules alone against rules plus Llama 3.3. The AI path reaches all 19 expected
+  findings where the rules reach 12, at 95% precision.
+
+Approving an exception waives the matching findings of the review it came from and recomputes that review's
+verdict. The "ten rejections never suppress a finding" hard gate runs in the smoke test. Where the build differs
+from the design is listed in section 12 of the design doc. The PR waits for review.

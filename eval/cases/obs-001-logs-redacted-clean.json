@@ -1,0 +1,13 @@
+{
+  "id": "obs-001-logs-redacted-clean",
+  "description": "Logs request metadata and only whether an Authorization header is present, never its value.",
+  "tags": [
+    "llm"
+  ],
+  "input": "export function handle(req) {\n  const hasAuth = req.headers.has(\"authorization\");\n  console.log(\"incoming request\", req.method, new URL(req.url).pathname, { hasAuth });\n  return route(req);\n}\n",
+  "expected": [],
+  "must_not_flag": [
+    "OBS-001",
+    "SEC-001"
+  ]
+}

@@ -125,3 +125,28 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .small-input { width: 100%; min-height: 70px; font: inherit; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); box-sizing: border-box; }
 .small-button { font-size: 12.5px; padding: 4px 10px; }
 .pill.disputed { background: var(--warn-bg); color: var(--warn-ink); }
+
+/* PR 3-C: feedback, exceptions, chat, dashboard */
+.stack.tight { gap: 6px; }
+.grow { flex: 1; min-width: 12rem; }
+.text-input { font: inherit; padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); }
+.num-input { font: inherit; width: 4.5rem; padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); }
+.link { background: none; border: 0; padding: 0; color: var(--accent); text-decoration: underline; font-size: inherit; }
+.finding.waived { opacity: 0.8; border-style: dashed; }
+.pill.waived-pill { background: #dcfae6; color: #067647; }
+.pill.disposition-accepted { color: var(--ok); }
+.pill.disposition-rejected { color: var(--err-ink); }
+.pill.state-pending { background: var(--warn-bg); color: var(--warn-ink); }
+.pill.state-active { background: #dcfae6; color: #067647; }
+.pill.state-expired, .pill.state-denied { color: var(--muted); }
+.waiver-note { background: var(--code-bg); padding: 6px 8px; border-radius: 6px; }
+.history summary { cursor: pointer; color: var(--muted); }
+.chat { display: flex; flex-direction: column; gap: 8px; max-height: 420px; overflow: auto; }
+.chat-msg { padding: 8px 10px; border-radius: 8px; background: var(--code-bg); max-width: 85%; }
+.chat-user { align-self: flex-end; }
+.chat-assistant { align-self: flex-start; border: 1px solid var(--border); background: var(--surface); }
+.chat-text { white-space: pre-wrap; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: 10px; }
+.tile { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+.tile-value { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.tile-label { font-size: 12px; color: var(--muted); }

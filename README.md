@@ -17,14 +17,14 @@ and every prompt is recorded in [`prompts.md`](prompts.md).
 | PR | Scope | State |
 |---|---|---|
 | 3-A Foundation | Worker + React, D1 schema, standards as YAML with versions and an audit log, demo identity, deterministic checks, eval harness architecture | merged |
-| 3-B AI review | Workflow pipeline, Llama 3.3 detection, evidence verification, challenges, rate limits and the daily AI budget | **this PR** |
-| 3-C Interaction and insight | Exceptions, chat, memory, dashboard, full eval | next |
+| 3-B AI review | Workflow pipeline, Llama 3.3 detection, evidence verification, challenges, rate limits and the daily AI budget | merged |
+| 3-C Interaction and insight | Exceptions with approval rules, accept/reject feedback, history, chat, dashboard, eval comparison | **this PR** |
 
 What works (tested; see below):
 
 - Paste a snippet or unified diff. The review runs in a **Cloudflare Workflow**, one step at a time:
-  load the standards snapshot, validate, deterministic rules, one **Llama 3.3** call per code chunk, then save. The
-  UI shows each step as it finishes.
+  load the standards snapshot and active exceptions, validate, deterministic rules, one **Llama 3.3** call per code
+  chunk, apply exceptions, then save. The UI shows each step as it finishes.
 - **Deterministic checks:** SEC-001 hardcoded secrets (credential-named literals and known token formats, each
   secret its own finding, all redacted), MNT-001 TODOs without a ticket, TST-001 new logic without tests (diffs
   only).
@@ -45,14 +45,36 @@ What works (tested; see below):
   characters, 15 lines of overlap, at most 40 chunks), never truncated. At most 200 findings are kept per review;
   the rest are recorded as a gap.
 - **Challenges:** "Challenge this finding" sends your argument, the standard and the surrounding code to the model.
-  An AI finding it agrees is wrong is marked **Disputed**, but its classification, severity and the verdict never
-  change (only an approved exception will waive a violation, in 3-C). A rule finding is always upheld. One
+  An AI finding it agrees is wrong is marked **Disputed by the author**, but its classification, severity and the
+  verdict never change (only an approved exception waives a violation). A rule finding is always upheld. One
   challenge per finding, only by the review's author or an approver, recorded with who, why and the model's
   reasoning.
+- **Exceptions** are the only thing that waives a violation. From a violation, the review's author (or an approver)
+  requests one: a standard, a path glob (`src/legacy/**`, or `*` for every path), a justification and an expiry of
+  at most 90 days. Only an approver who didn't request it can approve or deny it; nobody approves their own, which
+  a database constraint also enforces. Once approved:
+  - The matching findings in the review it came from are waived, that review's verdict is recomputed, and the
+    pipeline log records it. The findings stay on record, marked waived.
+  - Later reviews get matching findings waived by the `apply-exceptions` step until the exception expires.
+  - "Active" and "expired" are worked out from the expiry date, never stored, so an exception can't be left stale.
+- **Feedback:** the author or an approver can accept or reject a finding (rejecting needs a reason). Feedback is a
+  signal for the dashboard and for people. It never changes the finding or the verdict, and **ten rejections
+  don't stop a finding from being reported next time** (a hard gate in the smoke test). Detection and the waiver
+  step have no input that could carry feedback.
+- **History, where it can't suppress anything:** next to each finding, how that standard's findings fared in
+  other reviews (accepted, rejected, disputed, and the latest rejection reasons). The chat sees the same history.
+- **Chat** about a review: it sees the findings, the standards involved, active exceptions, that history and the
+  last 10 messages. It's advisory only: no tools, and it can't accept, reject, challenge or waive anything. Each
+  question costs one AI call from the daily budget. The review data sits between randomly tagged markers, like the
+  code in detection.
+- **Dashboard:** reviews by verdict, violations by severity (waived ones left out), the most frequent standards,
+  accept/reject counts and reject rate per standard, challenges (upheld and disputed by the author), exceptions
+  (pending, active, expired, denied) and today's AI budget. All are read live from D1. "Accepted" stands in for
+  "remediated", because the app can't see whether a fix landed.
 - **Cost protection** (design §10): per-IP rate limits (5 reviews and 10 challenges a minute; polling a running
   review has its own, looser limit) and a strict daily cap on AI calls in D1. Every model call, retries included,
   reserves one call first. Once the cap is reached, reviews still run the deterministic checks and are marked
-  `incomplete`, and challenges get `429` with `Retry-After`.
+  `incomplete`, and challenges and chat get `429` with `Retry-After`.
 - Standards live in `standards/*.yaml`. Approvers can enable or disable them, every change is audited, and every
   review keeps a snapshot of the version and status of every standard it ran with.
 
@@ -77,7 +99,8 @@ pulling new migrations; `npm run budget:reset:local` to reset today's local AI b
 ## Tests
 
 ```sh
-npm test            # unit tests: diff parsing, rules, chunking, verification, LLM detector, verdict, budget, scorer
+npm test            # unit tests: diff parsing, rules, chunking, verification, LLM detector, verdict, budget, scorer,
+                    # exceptions (matching, expiry, validation), every approval rule, the chat prompt
 npm run typecheck   # client, worker and node projects
 npm run smoke       # end-to-end API checks against `npm run dev` with LLM_MODE=fake (changes local data)
 npm run eval        # eval harness: scores the engine against labelled cases in eval/cases
@@ -98,13 +121,28 @@ told to fail. The smoke test uses it to check the whole pipeline without AI call
 - The 6th review request in a minute from one IP gets `429`, while 70 polls of one review a minute don't. 4,000
   TODOs give 200 findings and a recorded gap. Once the daily budget is used up, reviews run rules only and
   challenges get `429` with `Retry-After`.
+- Feedback is limited to the author or an approver, a reject needs a reason, and the verdict doesn't change.
+  **Hard gate:** after ten rejections, a new review of the same code still reports the finding and fails.
+- Exceptions:
+  - A request is refused (`400`) if it has no expiry or one over 90 days, or if its pattern misses the finding.
+  - A developer can't approve one, and nobody can approve their own (`403`).
+  - Two approvers approving at once give exactly one approval and one `409`.
+  - Approval waives the source finding and recomputes that review's verdict in SQL. The test checks the result
+    against the verdict rules.
+  - A later review of the same path is waived; another path isn't.
+- Chat answers, is stored with who asked, and spends one budget call.
+- The dashboard's numbers move exactly as expected, step by step: a new review, a rejection, an exception
+  request, and an approval.
 - Everything from 3-A: 401/403/404/405/413, audited toggles, snapshots, redaction regressions.
+
+The smoke test makes more fake AI calls than the real daily budget allows, so `.dev.vars.example` raises
+`DAILY_LLM_CALLS_APP` for fake mode. Delete that line before switching to `workers-ai`.
 
 ## Eval harness
 
 `eval/cases/*.json` are hand-labelled inputs: expected findings (standard and line range), `must_not_flag` for
-areas that look risky but comply, and `hard_gate` for cases that fail the whole run if missed (the two
-prompt-injection cases). `npm run eval -- --config <name>` runs every case through the same `review()` and
+areas that look risky but comply, and `hard_gate` for cases that fail the whole run if missed (three
+prompt-injection cases and a fixture key whose comment says not to flag it). `npm run eval -- --config <name>` runs every case through the same `review()` and
 detectors as the app and reports precision, recall and F1 per standard, false positives on clean cases,
 **blocker precision** on its own line, and the hard gates. `--save` writes `eval/results/<date>-<config>.json`.
 
@@ -113,12 +151,13 @@ detectors as the app and reports precision, recall and F1 per standard, false po
   `http://localhost:5173`). The endpoint needs the `EVAL_TOKEN` secret (from `.dev.vars` locally) and spends the
   separate eval budget, one call per model call (usually one per case).
 
-First real run (22 cases, Llama 3.3 70B, prompt v2, before the review fixes, [`eval/results/2026-11-23-llm-run1.json`](eval/results/2026-11-23-llm-run1.json)):
-recall 100% (17/17), precision 85%, both hard gates passed, **blocker precision 80%**. The two false blockers were
-AI "secrets" that were placeholders. The placeholder guard above fixed that case in a single re-run, but the full
-suite hasn't been re-run since. One OBS-001 false positive (a password literal flagged as "logging a secret")
-remains. A single run at temperature 0 says nothing about run-to-run variance; that's part of 3-C. Prompt v3 (random
-delimiters) has only been run on the two prompt-injection cases so far: both passed.
+**Results** are in [`eval/RESULTS.md`](eval/RESULTS.md): `rules` against `rules + Llama 3.3` (prompt v3), one run
+each on 25 cases (2026-11-24).
+- The AI path finds all 19 expected findings, where the rules can reach only 12 of them.
+- Precision is 95%, with one OBS-001 false positive on a clean case. Blocker precision is 100% (10 of 10).
+- All 4 hard gates pass.
+- Run-to-run variance and the other configurations in design §8 aren't measured yet: they don't fit the free
+  allocation (prompt 8).
 
 ## Layout
 
@@ -134,7 +173,7 @@ test/        unit tests (Vitest)
 docs/        design
 ```
 
-## Known limits (3-B)
+## Known limits
 
 - Demo identity only (see the top of this file).
 - The submitted input is stored as is, including any secret it contains. Findings, AI explanations and challenge
@@ -154,4 +193,11 @@ docs/        design
   wrongly flagged; that's what challenges and the eval's blocker precision are for.
 - TST-001 is satisfied by *any* test file in the diff. Secret detection uses patterns, not every format. The
   MNT-001 list of technical prefixes is fixed in code.
-- Exceptions (the only thing that can waive a violation), accept/reject feedback, chat and the dashboard are 3-C.
+- Approving an exception waives findings in the review it was requested from and in reviews that start after it.
+  It doesn't touch other past reviews, or a review already running when it was approved. An exception that
+  expires doesn't un-waive past reviews; it only stops waiving new ones.
+- Rejection reasons, from any user, reach the chat model as data, so a reason could try to steer the chat. The
+  chat is advisory and can't change anything; the reasons sit inside tagged markers, and the prompt says they are
+  opinions, not proof.
+- Rejecting the same finding repeatedly is allowed. Each rejection is kept in the feedback history, but the
+  dashboard counts each finding's latest disposition once.

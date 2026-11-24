@@ -54,9 +54,72 @@ export interface FindingView extends Finding {
   id: string;
   standardTitle: string | null;
   preExisting: boolean;
-  /** "disputed" marks a likely false positive. It never changes classification, severity or the verdict. */
+  /** "disputed" means the author's argument persuaded the AI. It never changes classification, severity or the verdict. */
   challengeOutcome: "upheld" | "disputed" | null;
   challenge: ChallengeView | null;
+  /** Latest accept/reject. Never affects detection or the verdict. */
+  disposition: "open" | "accepted" | "rejected";
+  /** The exception that waives this finding, if any. Waived findings don't count toward the verdict. */
+  waiver: { id: string; pathPattern: string; decidedBy: Ref | null; expiresAt: string } | null;
+  /** The latest exception requested from this finding, if any. */
+  exceptionRequest: { id: string; status: ExceptionView["status"] } | null;
+}
+
+/** How a standard's findings fared in other reviews. Shown next to findings and in chat, never used by detection. */
+export interface StandardHistoryView {
+  standardId: string;
+  accepted: number;
+  rejected: number;
+  disputed: number;
+  recentReasons: { reason: string; by: Ref; at: string }[];
+}
+
+export interface ChatMessageView {
+  id: number;
+  role: "user" | "assistant";
+  user: Ref | null;
+  content: string;
+  createdAt: string;
+}
+
+export interface ChatResult {
+  reply: string;
+  messages: ChatMessageView[];
+}
+
+export interface ExceptionView {
+  id: string;
+  standardId: string;
+  standardTitle: string | null;
+  pathPattern: string;
+  justification: string;
+  sourceFinding: { id: string; reviewId: string; file: string; lineStart: number } | null;
+  requestedBy: Ref;
+  status: "pending" | "approved" | "denied";
+  /** Derived, never stored: approved exceptions are active until expiresAt, then expired. */
+  state: "pending" | "active" | "expired" | "denied";
+  decidedBy: Ref | null;
+  decisionNote: string | null;
+  expiresAt: string;
+  createdAt: string;
+  decidedAt: string | null;
+}
+
+export interface DashboardView {
+  totalReviews: number;
+  verdicts: Record<Verdict, number>;
+  /** Violations not waived by an exception, by severity. */
+  violationsBySeverity: { blocker: number; major: number; minor: number };
+  suggestions: number;
+  waived: number;
+  topStandards: { id: string; title: string | null; count: number }[];
+  /** "Accepted" is the closest the app gets to "remediated": it can't see whether a fix landed. */
+  dispositions: { open: number; accepted: number; rejected: number };
+  rejectRateByStandard: { id: string; rate: number; n: number }[];
+  /** "disputed" means disputed by the author through a challenge: a signal, not a confirmed false positive. */
+  challenges: { upheld: number; disputed: number };
+  exceptions: { pending: number; active: number; expired: number; denied: number };
+  budget: MetaView["budget"];
 }
 
 export interface ChallengeResult {
@@ -99,6 +162,11 @@ export interface ReviewDetail {
   events: ReviewEvent[];
   /** Whether the requesting user may challenge this review's findings (see canChallenge). */
   viewerCanChallenge: boolean;
+  /** Whether the requesting user may accept/reject findings and request exceptions from them. */
+  viewerCanGiveFeedback: boolean;
+  /** Per standard with findings here: how its findings fared in other reviews. */
+  history: StandardHistoryView[];
+  messages: ChatMessageView[];
 }
 
 export interface ApiErrorBody {

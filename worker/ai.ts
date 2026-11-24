@@ -48,12 +48,18 @@ export function workersAiClient(ai: Ai): LlmClient {
 //   FAKE_LLM_HALLUCINATE       → an extra finding whose evidence isn't in the code (must be dropped)
 //   FAKE_LLM_FAIL              → the call fails (the chunk must become a coverage gap)
 // Challenges: an argument containing "not_supported" is assessed as not supported.
+// Chat: replies with the number of findings it was given and echoes the question.
 
 export const fakeClient: LlmClient = {
   model: "fake",
   async json(messages, schema) {
     const user = messages.find((m) => m.role === "user")?.content ?? "";
     const props = (schema as { properties?: Record<string, unknown> }).properties ?? {};
+    if ("reply" in props) {
+      const question = messages.at(-1)?.content ?? "";
+      const findings = /Findings \((\d+)\)/.exec(user)?.[1] ?? "?";
+      return { reply: `Fake model: this review has ${findings} finding(s). You asked: ${question.slice(0, 80)}` };
+    }
     if ("assessment" in props) {
       const arg = /BEGIN ARGUMENT ([0-9a-f]+)\n([\s\S]*)\nEND ARGUMENT \1/.exec(user)?.[2] ?? "";
       return arg.includes("not_supported")

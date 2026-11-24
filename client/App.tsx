@@ -3,8 +3,11 @@ import { api, setApiUser, type User } from "./api.ts";
 import { ReviewPage } from "./pages/ReviewPage.tsx";
 import { HistoryPage } from "./pages/HistoryPage.tsx";
 import { StandardsPage } from "./pages/StandardsPage.tsx";
+import { ExceptionsPage } from "./pages/ExceptionsPage.tsx";
+import { DashboardPage } from "./pages/DashboardPage.tsx";
 
-type Tab = "review" | "history" | "standards";
+type Tab = "review" | "history" | "exceptions" | "dashboard" | "standards";
+const TAB_LABEL: Record<Tab, string> = { review: "New review", history: "History", exceptions: "Exceptions", dashboard: "Dashboard", standards: "Standards" };
 const USER_KEY = "egc.demoUser";
 
 function readStoredUser(): string | null {
@@ -50,9 +53,9 @@ export function App() {
           <span className="logo">◆</span> Engineering Guardrail Copilot
         </div>
         <nav className="tabs">
-          {(["review", "history", "standards"] as Tab[]).map((t) => (
+          {(Object.keys(TAB_LABEL) as Tab[]).map((t) => (
             <button key={t} className={tab === t ? "tab active" : "tab"} onClick={() => { setTab(t); setOpenReview(null); }}>
-              {t === "review" ? "New review" : t === "history" ? "History" : "Standards"}
+              {TAB_LABEL[t]}
             </button>
           ))}
         </nav>
@@ -76,6 +79,8 @@ export function App() {
         {user && tab === "review" && <ReviewPage key={user.id} onOpen={(id) => { setOpenReview(id); setTab("history"); }} />}
         {user && tab === "history" && <HistoryPage key={user.id} openId={openReview} onOpen={setOpenReview} />}
         {user && tab === "standards" && <StandardsPage key={user.id} user={user} />}
+        {user && tab === "exceptions" && <ExceptionsPage key={user.id} user={user} onOpenReview={(id) => { setOpenReview(id); setTab("history"); }} />}
+        {user && tab === "dashboard" && <DashboardPage key={user.id} />}
       </main>
     </div>
   );

@@ -2,6 +2,7 @@
 // scored on. The cases, scorer and runner are the same for every configuration.
 import { readFileSync } from "node:fs";
 import { ruleDetector, type Detector } from "../core/engine.ts";
+import { PROMPT_VERSION } from "../core/prompts.ts";
 import { RULES } from "../core/rules.ts";
 import { usesRule } from "../core/standards.ts";
 import type { Finding, Standard } from "../core/types.ts";
@@ -28,7 +29,7 @@ export const CONFIGS: Record<string, EvalConfig> = {
   },
   llm: {
     name: "llm",
-    description: "Rules + Llama 3.3 70B, prompt v2, evidence verification on (the app's configuration).",
+    description: `Rules + Llama 3.3 70B, prompt ${PROMPT_VERSION}, evidence verification on (the app's configuration).`,
     detectors: (opts) => [ruleDetector, remoteLlmDetector(opts.target)],
     scope: (standards) => new Set(standards.map((s) => s.id)),
   },

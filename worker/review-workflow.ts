@@ -52,9 +52,11 @@ export class ReviewWorkflow extends WorkflowEntrypoint<Env, ReviewParams> {
       const r = await db.loadReviewForRun(env.DB, id);
       if (!r) throw new NonRetryableError(`Review ${id} not found.`);
       if (r.status === "queued") await db.markReviewRunning(env.DB, id);
-      // Standards snapshot only. No feedback history: detection never sees it (design §6).
-      await db.addEvent(env.DB, id, "load-context", "ok", null, `${r.standards.filter((s) => s.enabled).length} enabled standard(s)`);
-      return r;
+      // The standards snapshot and the exceptions active now. No feedback history: neither
+      // detection nor the waiver step ever sees it (design §6), so rejections can't suppress anything.
+      const exceptions = await db.listActiveExceptions(env.DB, new Date());
+      await db.addEvent(env.DB, id, "load-context", "ok", null, `${r.standards.filter((s) => s.enabled).length} enabled standard(s), ${exceptions.length} active exception(s)`);
+      return { ...r, exceptions };
     });
     if (ctx.status === "complete" || ctx.status === "failed") return { skipped: `review already ${ctx.status}` };
 
@@ -129,8 +131,12 @@ export class ReviewWorkflow extends WorkflowEntrypoint<Env, ReviewParams> {
       }
     }
 
-    // --- Verify happened per chunk; finalize and persist --------------------------------------
-    const result = finalize(input, [...rules.findings, ...llmFindings], skipped);
+    // --- Verify happened per chunk; apply exceptions, finalize and persist ---------------------
+    const result = finalize(input, [...rules.findings, ...llmFindings], skipped, ctx.exceptions);
+    const waived = result.findings.filter((f) => f.waivedBy);
+    await step.do("apply-exceptions", DB_STEP, () =>
+      db.addEvent(env.DB, id, "apply-exceptions", "ok", null, waived.length ? `${waived.length} finding(s) waived by ${[...new Set(waived.map((f) => f.waivedBy))].join(", ")}` : "nothing waived"),
+    );
     await step.do("persist", PERSIST_STEP, async () => {
       await db.completeReview(env.DB, id, { ...result, completedAt: new Date().toISOString() });
       await db.addEvent(env.DB, id, "persist", "ok", null, `${result.findings.length} finding(s), verdict ${result.verdict}`);
