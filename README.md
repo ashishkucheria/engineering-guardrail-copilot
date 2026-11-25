@@ -127,8 +127,8 @@ jobs:
 ```
 
 No `actions/checkout` is needed: the Action reads the diff and the standards through the GitHub API, and it never
-checks out or runs the pull request's code. No release is tagged yet, so until `v1` exists use `@master` or a
-commit SHA.
+checks out or runs the pull request's code. `v1` is the released tag; pin a commit SHA instead if you want a
+version that can never change under you.
 
 **Status.** Tested against a mocked GitHub and mocked providers, as a built bundle against a local fake GitHub, and
 on this repository's own pull requests with `provider: none`. The four provider adapters haven't been run against
