@@ -387,9 +387,8 @@ share the engine but not data.
 
 Built with an AI coding assistant (Claude Code), in phases, one pull request each, every one reviewed before merge.
 [`docs/build-notes/design.md`](docs/build-notes/design.md) is the design written before the build, with a record of
-where the build differs. [`docs/build-notes/prompts.md`](docs/build-notes/prompts.md) quotes every prompt verbatim
-up to the PR #4 review fixes, with what each was for and what came out of it. "Prompt N", "design §N" and "review
-of PR #N" in code comments point to these files and the merged pull requests.
+where the build differs. In code comments, "design §N" points to that file, "review of PR #N" to the merged pull
+request, and "prompt N" to the Nth round of instructions given to the assistant, whose decision the design notes record.
 
 ## Licence
 

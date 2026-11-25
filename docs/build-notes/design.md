@@ -1,7 +1,8 @@
 # Design (written in Phase 2, before the build)
 
-Status: **approved with decisions** (prompt 3 in [`prompts.md`](prompts.md)). Sections 11 and 12 record where the
-build differs. The "prompt N" references below point to that file.
+Status: **approved with decisions** (prompt 3). Sections 11 and 12 record where the build differs. "Prompt N" below
+is the Nth round of instructions given to the AI coding assistant during the build; the decision each one made is
+recorded here.
 
 Decisions made:
 
