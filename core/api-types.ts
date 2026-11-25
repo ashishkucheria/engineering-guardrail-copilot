@@ -133,8 +133,11 @@ export interface ChallengeResult {
 }
 
 export interface MetaView {
-  llmMode: "workers-ai" | "fake" | "off";
+  /** Which AI the server is configured with. */
+  llmMode: "off" | "fake" | "openai-compatible" | "anthropic" | "gemini" | "workers-ai";
   model: string | null;
+  /** Set when AI is configured but can't be used (an unknown LLM_MODE, a missing key). */
+  aiError: string | null;
   promptVersion: string;
   budget: { day: string; app: { used: number; limit: number }; eval: { used: number; limit: number } };
 }

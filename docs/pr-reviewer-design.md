@@ -220,12 +220,14 @@ action/github.ts            PR files, contents at a ref, check runs, comments, o
 action/standards.ts         standards from the repository at the base commit, or the built-in set
 action/exceptions.ts       `.guardrail/exceptions.yaml` at the base commit: validation, expiry, what is ignored and why
 action/publish.ts           gating, annotations, summary Markdown, escaping (pure, unit-tested)
-action/providers/*.ts       openai-compatible, anthropic, gemini, workers-ai
+core/providers/*.ts         openai-compatible, anthropic, gemini, workers-ai (shared with the web app)
 core/                       unchanged except: standards from YAML text, per-file limits, generated-file skipping
 dist/action/index.cjs       bundled by esbuild (npm run build:action), committed (Actions run it straight from the tag)
 ```
 
-The web app keeps its Workers AI binding client in `worker/ai.ts`; the REST client for the Action is separate.
+The web app uses the same provider clients (`worker/ai.ts` picks one from `LLM_MODE`). Gemini writes a multi-turn
+conversation (the app's review chat) as one transcript, since the Interactions API with `store: false` has no
+documented way to pass earlier turns.
 CI rebuilds the bundle and fails if `dist/action/` is out of date. The built-in standards are compiled into the
 bundle from `standards/`, so the Action needs no files next to it. The bundle is about 1.6 MB, three quarters of it
 the Anthropic SDK; replacing it with a plain `fetch` adapter would make the bundle roughly a quarter of the size.

@@ -1,11 +1,11 @@
 // Provider adapters against recorded-shape responses, with fetch mocked. No network, no keys.
 import { describe, expect, it } from "vitest";
-import { anthropicClient } from "../action/providers/anthropic.ts";
-import { geminiClient, GEMINI_URL } from "../action/providers/gemini.ts";
-import { errorDetail, MIN_MAX_TOKENS, postJson, ProviderError, strictSchema, type FetchFn } from "../action/providers/http.ts";
-import { createClient } from "../action/providers/index.ts";
-import { openAiCompatibleClient, stepDown, tokenLimitFrom } from "../action/providers/openai-compatible.ts";
-import { workersAiRestClient } from "../action/providers/workers-ai.ts";
+import { anthropicClient } from "../core/providers/anthropic.ts";
+import { geminiClient, GEMINI_URL } from "../core/providers/gemini.ts";
+import { errorDetail, MIN_MAX_TOKENS, postJson, ProviderError, strictSchema, type FetchFn } from "../core/providers/http.ts";
+import { createClient } from "../core/providers/index.ts";
+import { openAiCompatibleClient, stepDown, tokenLimitFrom } from "../core/providers/openai-compatible.ts";
+import { workersAiRestClient } from "../core/providers/workers-ai.ts";
 import { parseDetection, type LlmClient } from "../core/llm.ts";
 import { detectionSchema, type ChatMessage } from "../core/prompts.ts";
 
@@ -256,9 +256,21 @@ describe("gemini", () => {
     await expectProviderError(geminiClient({ apiKey: KEY, fetch: mockFetch(interaction("incomplete")).fetch }).json(MESSAGES, SCHEMA), true, /status incomplete/);
   });
 
-  it("refuses multi-turn requests instead of flattening them", async () => {
-    const turns: ChatMessage[] = [...MESSAGES, { role: "assistant", content: "a" }, { role: "user", content: "b" }];
-    await expectProviderError(geminiClient({ apiKey: KEY, fetch: mockFetch().fetch }).json(turns, SCHEMA), false, /single-turn/);
+  it("sends a conversation as one transcript that ends with the latest question", async () => {
+    const m = mockFetch(json({ status: "completed", steps: [{ type: "model_output", content: [{ type: "text", text: '{"reply":"ok"}' }] }] }));
+    const turns: ChatMessage[] = [...MESSAGES, { role: "assistant", content: "first answer" }, { role: "user", content: "second question" }];
+    await geminiClient({ apiKey: KEY, fetch: m.fetch }).json(turns, SCHEMA);
+    const input = m.calls[0]!.body.input as string;
+    expect(typeof input).toBe("string");
+    const user = MESSAGES.find((x) => x.role === "user")!.content;
+    expect(input.indexOf(user)).toBeLessThan(input.indexOf("Assistant:\nfirst answer"));
+    expect(input.endsWith("User:\nsecond question")).toBe(true);
+    expect(input).not.toContain(MESSAGES.find((x) => x.role === "system")!.content); // the system prompt stays in system_instruction
+  });
+
+  it("refuses a conversation that doesn't end with the user", async () => {
+    const turns: ChatMessage[] = [...MESSAGES, { role: "assistant", content: "a" }];
+    await expectProviderError(geminiClient({ apiKey: KEY, fetch: mockFetch().fetch }).json(turns, SCHEMA), false, /last message must be from the user/);
   });
 });
 

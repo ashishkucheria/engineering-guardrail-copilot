@@ -9,7 +9,7 @@
 // and SEC-001 from the rules. The key is read from the environment and never printed.
 import { review, ruleDetector } from "../core/engine.ts";
 import { llmDetector } from "../core/llm.ts";
-import { createClient, PROVIDERS } from "../action/providers/index.ts";
+import { createClient, PROVIDERS } from "../core/providers/index.ts";
 import { loadStandards } from "./load-standards.ts";
 
 const provider = process.argv[2] ?? "";

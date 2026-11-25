@@ -6,8 +6,8 @@
 //      a 400 naming max_completion_tokens     → send max_tokens instead
 //      a 400 naming response_format or schema → json_object, with the schema in the prompt
 // What was learned is kept for the client's later calls, so each step-down costs one request once.
-import type { LlmClient } from "../../core/llm.ts";
-import type { ChatMessage, JsonSchema } from "../../core/prompts.ts";
+import type { LlmClient } from "../llm.ts";
+import type { ChatMessage, JsonSchema } from "../prompts.ts";
 import { MIN_MAX_TOKENS, postJson, ProviderError, strictSchema, type FetchFn } from "./http.ts";
 
 export const OPENAI_BASE_URL = "https://api.openai.com/v1";

@@ -1,6 +1,6 @@
 // Cloudflare Workers AI over REST, for running outside a Worker. Same request as the app's binding
 // client (worker/ai.ts): JSON mode with a schema, temperature 0 and a seed.
-import { BASE_SEED, type LlmClient } from "../../core/llm.ts";
+import { BASE_SEED, type LlmClient } from "../llm.ts";
 import { postJson, ProviderError, type FetchFn } from "./http.ts";
 
 export const WORKERS_AI_DEFAULT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";

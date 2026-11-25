@@ -38,8 +38,8 @@ async function api(method, path, { user, body, raw, ip } = {}) {
   return { status: res.status, data, headers: res.headers };
 }
 /** Submit a review and wait for the Workflow to finish it. */
-async function reviewOf(input, user = DEV, timeoutMs = 120_000) {
-  const created = await api("POST", "/api/reviews", { user, body: { input } });
+async function reviewOf(input, user = DEV, timeoutMs = 120_000, extra = {}) {
+  const created = await api("POST", "/api/reviews", { user, body: { input, ...extra } });
   assert(created.status === 202 && created.data.status === "queued", `POST /api/reviews: ${created.status} ${JSON.stringify(created.data)}`);
   const until = Date.now() + timeoutMs;
   for (;;) {
@@ -133,6 +133,18 @@ await check("an AI failure after retries is a coverage gap, and every attempt is
   assert(r.coverage.skipped.some((s) => /AI review failed/.test(s.reason)), `coverage ${JSON.stringify(r.coverage)}`);
   assert(r.events.filter((e) => e.outcome === "retry").length >= 2, "the detect step should have been retried");
   assert(r.events.some((e) => e.step.startsWith("detect:") && e.outcome === "failed"), "missing failed detect event");
+});
+
+await check("a review submitted with AI turned off runs the rules only and spends nothing", async () => {
+  const before = (await api("GET", "/api/meta")).data.budget.app.used;
+  const r = await reviewOf('const r = await fetch("https://x.example/a");\nconst apiKey = "abcd1234abcd1234";\n', DEV, 120_000, { ai: false });
+  const used = (await api("GET", "/api/meta")).data.budget.app.used - before;
+  assert(used === 0, `${used} AI call(s) reserved for a rules-only review`);
+  assert(r.findings.every((f) => f.source === "rule") && r.findings.length > 0, `findings ${JSON.stringify(r.findings.map((f) => f.source))}`);
+  assert(r.verdict === "fail", `the rule blocker should still fail it, got ${r.verdict}`);
+  assert(r.coverage.skipped.some((s) => s.reason === "AI review was turned off for this review"), `coverage ${JSON.stringify(r.coverage)}`);
+  assert(r.model === null, `model ${r.model}`);
+  assert((await api("POST", "/api/reviews", { user: DEV, body: { input: "x", ai: "no" } })).status === 400, "a non-boolean ai should be 400");
 });
 
 await check("a blocker from the rules still fails the review when the AI is down", async () => {

@@ -38410,7 +38410,7 @@ function stripPrefix(p) {
   return p.trim().replace(/^[ab]\//, "").split("	")[0];
 }
 
-// action/providers/http.ts
+// core/providers/http.ts
 init_define_BUILTIN_STANDARDS();
 var DEFAULT_TIMEOUT_MS = 12e4;
 var MIN_MAX_TOKENS = 16e3;
@@ -38623,10 +38623,10 @@ Binary files a/${from} and b/${f.filename} differ`);
 ` : "", gaps };
 }
 
-// action/providers/index.ts
+// core/providers/index.ts
 init_define_BUILTIN_STANDARDS();
 
-// action/providers/anthropic.ts
+// core/providers/anthropic.ts
 init_define_BUILTIN_STANDARDS();
 init_sdk();
 var ANTHROPIC_DEFAULT_MODEL = "claude-opus-5-5";
@@ -38672,11 +38672,23 @@ function anthropicClient(opts) {
   };
 }
 
-// action/providers/gemini.ts
+// core/providers/gemini.ts
 init_define_BUILTIN_STANDARDS();
 var GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
 var GEMINI_API_REVISION = "2026-05-20";
 var GEMINI_DEFAULT_MODEL = "gemini-3.5-flash-lite";
+function geminiInput(turns) {
+  if (turns.length === 1) return turns[0].content;
+  const said = turns.slice(0, -1).map((t) => `${t.role === "assistant" ? "Assistant" : "User"}:
+${t.content}`);
+  return [
+    "The conversation so far:",
+    ...said,
+    "Reply to the user's latest message, which follows. Answer only that message, in the JSON format required.",
+    `User:
+${turns.at(-1).content}`
+  ].join("\n\n");
+}
 function geminiClient(opts) {
   const model = opts.model || GEMINI_DEFAULT_MODEL;
   return {
@@ -38684,13 +38696,13 @@ function geminiClient(opts) {
     async json(messages, schema, callOpts) {
       const system = messages.filter((m) => m.role === "system").map((m) => m.content).join("\n\n");
       const turns = messages.filter((m) => m.role !== "system");
-      if (turns.length !== 1 || turns[0].role !== "user") throw new ProviderError("gemini: only single-turn requests are supported", void 0, false);
+      if (turns.length === 0 || turns.at(-1).role !== "user") throw new ProviderError("gemini: the last message must be from the user", void 0, false);
       const res = await postJson(
         GEMINI_URL,
         { "x-goog-api-key": opts.apiKey, "api-revision": GEMINI_API_REVISION },
         {
           model,
-          input: turns[0].content,
+          input: geminiInput(turns),
           ...system ? { system_instruction: system } : {},
           response_format: { type: "text", mime_type: "application/json", schema },
           generation_config: {
@@ -38709,7 +38721,7 @@ function geminiClient(opts) {
   };
 }
 
-// action/providers/openai-compatible.ts
+// core/providers/openai-compatible.ts
 init_define_BUILTIN_STANDARDS();
 var OPENAI_BASE_URL = "https://api.openai.com/v1";
 var OPENAI_DEFAULT_MODEL = "gpt-6-luna";
@@ -38780,7 +38792,7 @@ function readChoice(res) {
   throw new ProviderError(`openai-compatible: no content in the response (finish_reason ${String(choice?.finish_reason ?? "missing")})`, 200, true);
 }
 
-// action/providers/workers-ai.ts
+// core/providers/workers-ai.ts
 init_define_BUILTIN_STANDARDS();
 
 // core/llm.ts
@@ -39283,7 +39295,7 @@ function describeDrops(r) {
   return parts.join("; ");
 }
 
-// action/providers/workers-ai.ts
+// core/providers/workers-ai.ts
 var WORKERS_AI_DEFAULT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 function workersAiRestClient(opts) {
   if (!/^[0-9a-f]{32}$/i.test(opts.accountId)) throw new ProviderError("workers-ai: cloudflare-account-id must be a 32-character hex id", void 0, false);
@@ -39311,7 +39323,7 @@ function workersAiRestClient(opts) {
   };
 }
 
-// action/providers/index.ts
+// core/providers/index.ts
 var PROVIDERS = ["openai-compatible", "anthropic", "gemini", "workers-ai", "none"];
 function createClient(i) {
   const provider = i.provider.trim();

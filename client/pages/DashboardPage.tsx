@@ -1,14 +1,17 @@
 import { useEffect, useState } from "react";
-import { api, type DashboardView } from "../api.ts";
+import { api, type DashboardView, type MetaView } from "../api.ts";
+import { aiLabel } from "../ai-label.ts";
 
 const pct = (r: number) => `${Math.round(r * 100)}%`;
 
 export function DashboardPage() {
   const [d, setD] = useState<DashboardView | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [meta, setMeta] = useState<MetaView | null>(null);
 
   useEffect(() => {
     api.dashboard().then(setD).catch((e: Error) => setError(e.message));
+    api.meta().then(setMeta).catch(() => setMeta(null));
   }, []);
 
   if (error) return <div className="error">{error}</div>;
@@ -89,6 +92,7 @@ export function DashboardPage() {
           <Tile label="Revoked" value={d.exceptions.revoked} />
           <Tile label={`AI calls today (${d.budget.day})`} value={`${d.budget.app.used} / ${d.budget.app.limit}`} />
         </div>
+        {meta && <p className="muted small">AI provider: {aiLabel(meta)}{meta.aiError ? ` (${meta.aiError})` : ""}. Set by LLM_MODE on the server; each review can turn AI off.</p>}
       </section>
     </div>
   );

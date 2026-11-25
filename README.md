@@ -16,7 +16,7 @@ flowchart LR
   UI[React UI] -->|/api/*| W[API Worker]
   W -->|start| WF[Review Workflow]
   WF --> R[Deterministic rules]
-  WF --> AI[Workers AI: Llama 3.3]
+  WF --> AI[AI provider: Gemini, Anthropic, OpenAI-compatible or Workers AI]
   AI --> V[Evidence verification]
   R --> X[Apply exceptions]
   V --> X
@@ -32,8 +32,13 @@ everything in D1. The model can explain and argue; code decides what counts as a
 ## Features
 
 - Paste a snippet or unified diff. The review runs in a **Cloudflare Workflow**, one step at a time:
-  load the standards snapshot and active exceptions, validate, deterministic rules, one **Llama 3.3** call per code
-  chunk, apply exceptions, then save. The UI shows each step as it finishes.
+  load the standards snapshot and active exceptions, validate, deterministic rules, one AI call per code chunk,
+  apply exceptions, then save. The UI shows each step as it finishes.
+- **AI review option:** the server's AI provider is set by `LLM_MODE` (Google Gemini, Anthropic, any
+  OpenAI-compatible API, or Workers AI), with the key as a server secret that never reaches the browser. Each
+  review can untick **AI review** to run the deterministic checks only: nothing is sent to the provider, and a
+  review that needs the AI standards is marked incomplete. The Review page and the Dashboard show which provider
+  is in use.
 - **Deterministic checks:** SEC-001 hardcoded secrets (credential-named literals and known token formats, each
   secret its own finding, all redacted), MNT-001 TODOs without a ticket, TST-001 new logic without tests (diffs
   only).
@@ -131,8 +136,9 @@ checks out or runs the pull request's code. `v1` is the released tag; pin a comm
 version that can never change under you.
 
 **Status.** Tested against a mocked GitHub and mocked providers, as a built bundle against a local fake GitHub, and
-on this repository's own pull requests with `provider: none`. The four provider adapters haven't been run against
-the real services; `npm run try:provider -- <provider>` does that with your key (see
+on this repository's own pull requests with `provider: none`. The Action hasn't run with a real provider. Of its four
+provider clients, only Gemini's has been called against the real service, from the web app, which shares them;
+`npm run try:provider -- <provider>` runs one with your key (see
 [`scripts/try-provider.ts`](scripts/try-provider.ts)).
 
 ### What it writes
@@ -232,9 +238,19 @@ npm run db:setup:local           # apply migrations to the local D1 and seed sta
 npm run dev                      # http://localhost:5173
 ```
 
-To use the real model, set `LLM_MODE=workers-ai` in `.dev.vars` and run `npx wrangler login` first. Workers AI
-always runs remotely, also in local dev, and uses your account's Workers AI allocation (10,000 neurons a day free;
-one review chunk is roughly 250 neurons). `LLM_MODE=off` runs the deterministic checks only.
+To use a real model, set the provider and its key in `.dev.vars` (never commit it), then restart `npm run dev`:
+
+```sh
+LLM_MODE=gemini            # or anthropic, openai-compatible, workers-ai
+LLM_API_KEY=...            # the provider's API key (for workers-ai, a Cloudflare API token)
+# LLM_MODEL=...            # optional; defaults: gemini-3.5-flash-lite, claude-opus-5-5, gpt-6-luna, Llama 3.3
+# LLM_BASE_URL=...         # openai-compatible only (Groq, OpenRouter, Ollama, ...)
+# CLOUDFLARE_ACCOUNT_ID=...  # workers-ai only
+```
+
+These use the same provider clients as the GitHub Action (`core/providers/`). With a real provider the app makes at
+most 20 AI calls a day. `LLM_MODE=off` runs the deterministic checks only. A missing key or an unknown mode isn't
+a silent rules-only run: the Review page shows the problem and reviews with AI ticked are refused until it's fixed.
 
 Other local commands: `npm run db:seed:local` after editing `standards/*.yaml`; `npm run db:migrate:local` after
 pulling new migrations; `npm run budget:reset:local` to reset today's local AI budget.
@@ -251,11 +267,12 @@ npx wrangler d1 migrations apply DB --remote
 node scripts/seed.ts && npx wrangler d1 execute DB --remote --file=.wrangler/seed.sql
 ```
 
-The deployed app uses the real model (`LLM_MODE=workers-ai` in `wrangler.jsonc`) with at most 20 app calls a day.
-For the eval endpoint, also run `npx wrangler secret put EVAL_TOKEN`. To remove everything:
+`wrangler.jsonc` ships with `LLM_MODE=off`, so a fresh deploy sends nothing anywhere. To turn AI on, set
+`LLM_MODE` to a provider in `wrangler.jsonc` and run `npx wrangler secret put LLM_API_KEY`; the app then makes at
+most 20 AI calls a day. For the eval endpoint, also run `npx wrangler secret put EVAL_TOKEN`. To remove everything:
 `npx wrangler delete`, `npx wrangler workflows delete guardrail-review` and `npx wrangler d1 delete guardrail-copilot`.
 
-Checked end to end on 2026-11-24 with the real model: reviews, challenges, chat, exception approve and revoke, and
+Checked end to end on 2026-11-24 with Workers AI (Llama 3.3): reviews, challenges, chat, exception approve and revoke, and
 the dashboard, using 6 AI calls.
 
 ## Tests
@@ -270,7 +287,7 @@ npm run eval        # eval harness: scores the engine against labelled cases in 
 
 CI (`.github/workflows/ci.yml`) runs all of these on every PR with no Cloudflare account: generated Worker types
 are up to date, typecheck, unit tests, the rules eval in `--strict` mode, build, and the smoke test against a
-local server running the fake model (`LOCAL_ONLY=1` turns off remote bindings).
+local server running the fake model.
 
 The fake model (`worker/ai.ts`) recognises a few patterns, invents one quote that isn't in the code, and can be
 told to fail. The smoke test uses it to check the whole pipeline without AI calls:
@@ -352,10 +369,15 @@ docs/        build notes: the design and the prompt history
 - Any demo user can read any review. With stored inputs, the demo must not be used with real secrets.
 - One abuser can use up the day's AI budget for everyone. The demo then runs deterministic checks only; it never
   becomes an unbounded bill. Per-IP limits can be dodged with many IPs; the global budget still holds.
-- The free Workers AI allocation (10,000 neurons, about 33 calls a day at roughly 300 neurons a call) is shared by
-  the app, local development and the eval. The caps (`DAILY_LLM_CALLS_APP=20`, `DAILY_LLM_CALLS_EVAL=25` in
-  `wrangler.jsonc`) add up to 45: a ceiling on what the app tries, not a guarantee. A call past the free allocation
-  fails (no charge) and shows as a coverage gap.
+- The caps (`DAILY_LLM_CALLS_APP=20`, `DAILY_LLM_CALLS_EVAL=25` in `wrangler.jsonc`) limit what the app tries,
+  not what the provider allows: a call the provider refuses (a free-tier limit, a quota) fails and shows as a
+  coverage gap. What a call costs depends on the provider and model.
+- With AI ticked, the submitted code goes to the configured provider. Gemini requests are sent with `store: false`,
+  but on Gemini's free tier Google may use the content to improve its products; use a paid key for real code.
+- Only Workers AI (Llama 3.3) has been measured by the eval. In the app, Workers AI was checked end to end when
+  deployed, and Gemini (`gemini-3.5-flash-lite`) in local dev on 2026-11-25: a review, a challenge and a two-message
+  chat, with one HTTP 503 retried. Anthropic and OpenAI-compatible share the Action's tested clients, but haven't
+  been run against the real services.
 - A "disputed" challenge comes from a model reading the developer's own argument, so it can be steered. It never
   changes the verdict, and it shouldn't be read as a confirmed false positive.
 - The 1 MiB limit on Workflow step output isn't enforced in local dev. Findings are capped inside the steps, but
