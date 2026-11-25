@@ -11,10 +11,12 @@ import { ApiError } from "./http.ts";
 export { aiConfigError, type LlmMode };
 
 /**
- * Under the review step's 2-minute timeout, so a slow provider fails as a provider error the
- * Workflow can retry, not as a step timeout.
+ * Well under the review step's 2-minute timeout, so a slow provider fails as a provider error the
+ * Workflow can retry, not as a step timeout. A normal call takes about 10 s (one chunk is at most
+ * 8,000 characters and the reply is small JSON), so 60 s is generous while a hung request (seen
+ * with Gemini under load) costs 60 s rather than 100 s before the retry.
  */
-const PROVIDER_TIMEOUT_MS = 100_000;
+const PROVIDER_TIMEOUT_MS = 60_000;
 
 export const llmMode = (env: AiSettings): LlmMode | null => llmModeOf(env);
 
