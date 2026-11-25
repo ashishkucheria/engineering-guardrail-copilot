@@ -3,7 +3,7 @@
 // neither is sent. Server-side fallback ("default") lets the API re-run a request on its fallback
 // model when the requested one declines; on a model without fallbacks the request runs as it is.
 import Anthropic from "@anthropic-ai/sdk";
-import type { LlmClient } from "../../core/llm.ts";
+import type { LlmClient } from "../llm.ts";
 import { DEFAULT_TIMEOUT_MS, MIN_MAX_TOKENS, ProviderError, isRetryableStatus, strictSchema, type FetchFn } from "./http.ts";
 
 export const ANTHROPIC_DEFAULT_MODEL = "claude-opus-5-5";

@@ -1,14 +1,23 @@
 # Copy to .dev.vars for local development (.dev.vars is git-ignored). Values override wrangler.jsonc.
 #
 # LLM_MODE:
-#   fake        deterministic stand-in, no AI calls, no cost. Use it for `npm run smoke`.
-#   workers-ai  the real model. Needs `npx wrangler login`; uses your account's Workers AI allocation.
-#   off         no AI; LLM standards are reported as unchecked.
+#   fake               deterministic stand-in, no AI calls, no cost. Use it for `npm run smoke`.
+#   gemini             Google Gemini (default model gemini-3.5-flash-lite)
+#   anthropic          Anthropic (default model claude-opus-5-5)
+#   openai-compatible  OpenAI or any compatible API (default model gpt-6-luna; LLM_BASE_URL for others)
+#   workers-ai         Cloudflare Workers AI over its REST API (needs CLOUDFLARE_ACCOUNT_ID; the key is an API token)
+#   off                no AI; LLM standards are reported as unchecked.
 LLM_MODE=fake
 
+# For a real provider. The key stays on the server; it is never sent to the browser or logged.
+# LLM_API_KEY=
+# LLM_MODEL=
+# LLM_BASE_URL=
+# CLOUDFLARE_ACCOUNT_ID=
+
 # The smoke test spends more fake AI calls than the app's real daily budget (20). Fake calls cost
-# nothing, so the budget is raised here. The value only applies with LLM_MODE=fake: with workers-ai the
-# app never allows more than 20 app calls a day, whatever this says.
+# nothing, so the budget is raised here. The value only applies with LLM_MODE=fake: with a real provider
+# the app never allows more than 20 app calls a day, whatever this says.
 DAILY_LLM_CALLS_APP=60
 
 # Needed only for `npm run eval -- --config llm`. Any long random string; the eval runner reads the

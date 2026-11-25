@@ -192,11 +192,11 @@ export async function completeReview(
 }
 
 /** What a Workflow run needs: the input, and every standard exactly as it was snapshotted at submit. */
-export async function loadReviewForRun(db: D1Database, id: string): Promise<{ inputText: string; status: string; standards: Standard[] } | null> {
+export async function loadReviewForRun(db: D1Database, id: string): Promise<{ inputText: string; status: string; ai: boolean; standards: Standard[] } | null> {
   const r = await db
-    .prepare("SELECT input_text, status, standards_snapshot FROM reviews WHERE id = ?")
+    .prepare("SELECT input_text, status, engine, standards_snapshot FROM reviews WHERE id = ?")
     .bind(id)
-    .first<{ input_text: string; status: string; standards_snapshot: string }>();
+    .first<{ input_text: string; status: string; engine: string; standards_snapshot: string }>();
   if (!r) return null;
   const snapshot = JSON.parse(r.standards_snapshot) as StandardSnapshot[];
   const versions = await db
@@ -225,7 +225,8 @@ export async function loadReviewForRun(db: D1Database, id: string): Promise<{ in
       enabled: s.enabled,
     };
   });
-  return { inputText: r.input_text, status: r.status, standards };
+  // The engine recorded at submit says whether this review asked for AI ("rules" means it didn't).
+  return { inputText: r.input_text, status: r.status, ai: r.engine.startsWith("rules+llm"), standards };
 }
 
 /** Whether a review is still queued/running although it was created before `before`. */

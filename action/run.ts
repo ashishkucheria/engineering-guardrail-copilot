@@ -9,8 +9,8 @@ import type { Coverage, Finding, ParsedInput, Verdict } from "../core/types.ts";
 import { computeVerdict } from "../core/verdict.ts";
 import { DEFAULT_EXCEPTIONS_PATH, loadExceptions, NO_EXCEPTIONS, type LoadedExceptions } from "./exceptions.ts";
 import { assembleDiff, type GitHubClient } from "./github.ts";
-import { createClient } from "./providers/index.ts";
-import { ProviderError, type FetchFn } from "./providers/http.ts";
+import { createClient } from "../core/providers/index.ts";
+import { ProviderError, type FetchFn } from "../core/providers/http.ts";
 import { annotationsFor, CHECK_NAME, checkTitle, countFindings, fingerprintOf, gate, MAX_INLINE_PER_RUN, planInline, renderSummary, staleBody, STALE_MARKER, SUMMARY_MARKER, type Conclusion, type Counts, type FailOn, type Waived } from "./publish.ts";
 import { loadStandards } from "./standards.ts";
 

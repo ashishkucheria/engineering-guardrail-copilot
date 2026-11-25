@@ -10,7 +10,7 @@ import { buildChallengeMessages, buildChatMessages, CHALLENGE_SCHEMA, CHAT_SCHEM
 import { redactSecrets } from "../core/rules.ts";
 import { snapshotOf } from "../core/standards.ts";
 import type { User } from "../core/types.ts";
-import { llmClient, llmMode } from "./ai.ts";
+import { aiConfigError, llmClient, llmMode } from "./ai.ts";
 import { budgetLimit, reserve, secondsUntilReset, usage, utcDay, type Bucket } from "./budget.ts";
 import * as db from "./db.ts";
 import { ApiError, errorResponse, json, readJson } from "./http.ts";
@@ -107,12 +107,15 @@ route("PATCH", "/api/standards/:id", async ({ req, env, params }) => {
 
 route("POST", "/api/reviews", async ({ req, env }) => {
   const user = await requireUser(req, env);
-  const input = readInput(await readJson(req, INPUT_BODY_CAP));
+  const body = await readJson(req, INPUT_BODY_CAP);
+  const input = readInput(body);
+  if (body.ai !== undefined && typeof body.ai !== "boolean") throw new ApiError(400, "invalid_body", '"ai" must be true or false.');
 
   // Snapshot every standard (enabled or not) at submit, so this review keeps the versions and
   // statuses it ran against even if the standards change while it runs, or later.
   const standards = (await db.listStandards(env.DB)).map(db.effective);
-  const client = llmClient(env);
+  // "ai": false asks for a rules-only review; the AI standards are then reported as not checked.
+  const client = body.ai === false ? null : llmClient(env);
   const id = crypto.randomUUID();
   await db.insertQueuedReview(env.DB, {
     id,
@@ -394,10 +397,11 @@ function assertAllowed(d: Decision): void {
 route("GET", "/api/meta", async ({ env }) => {
   const now = new Date();
   const used = await usage(env.DB, now);
-  const mode = llmMode(env);
+  const aiError = aiConfigError(env);
   return json({
-    llmMode: mode,
-    model: llmClient(env)?.model ?? null,
+    llmMode: llmMode(env) ?? "off",
+    model: aiError ? null : (llmClient(env)?.model ?? null),
+    aiError,
     promptVersion: PROMPT_VERSION,
     budget: {
       day: utcDay(now),

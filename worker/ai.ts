@@ -1,44 +1,38 @@
-// LLM clients. `workers-ai` calls Llama 3.3 in JSON mode. `fake` is a deterministic stand-in for
-// the smoke test and CI: it makes no network call and costs nothing, so the whole pipeline
-// (Workflow, verification, persistence, challenge) can be tested without the model.
-import { BASE_SEED, type LlmClient } from "../core/llm.ts";
-import type { ChatMessage, JsonSchema } from "../core/prompts.ts";
+// LLM clients for the web app. A real provider (OpenAI-compatible, Anthropic, Gemini or Workers AI)
+// goes through the same clients as the Action (core/providers), configured by LLM_MODE plus the
+// LLM_API_KEY secret. `fake` is a deterministic stand-in for the smoke test and CI: it makes no
+// network call and costs nothing, so the whole pipeline (Workflow, verification, persistence,
+// challenge) can be tested without a model.
+import { aiConfigError, llmModeOf, type AiSettings, type LlmMode } from "../core/ai-config.ts";
+import type { LlmClient } from "../core/llm.ts";
+import { createClient } from "../core/providers/index.ts";
+import { ApiError } from "./http.ts";
 
-export const MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+export { aiConfigError, type LlmMode };
 
-export type LlmMode = "workers-ai" | "fake" | "off";
+/**
+ * Under the review step's 2-minute timeout, so a slow provider fails as a provider error the
+ * Workflow can retry, not as a step timeout.
+ */
+const PROVIDER_TIMEOUT_MS = 100_000;
 
-export function llmMode(env: Pick<Env, "LLM_MODE">): LlmMode {
-  const m = String(env.LLM_MODE);
-  return m === "fake" || m === "off" ? m : "workers-ai";
-}
+export const llmMode = (env: AiSettings): LlmMode | null => llmModeOf(env);
 
-/** null when AI is turned off. */
-export function llmClient(env: Env): LlmClient | null {
-  const mode = llmMode(env);
+/** null when AI is turned off. Throws a 503 when it is configured wrongly (never a silent rules-only run). */
+export function llmClient(env: AiSettings): LlmClient | null {
+  const error = aiConfigError(env);
+  if (error) throw new ApiError(503, "ai_misconfigured", `AI is misconfigured: ${error}`);
+  const mode = llmMode(env)!;
   if (mode === "off") return null;
   if (mode === "fake") return fakeClient;
-  return workersAiClient(env.AI);
-}
-
-type AiRun = (model: string, input: Record<string, unknown>) => Promise<{ response?: unknown }>;
-
-export function workersAiClient(ai: Ai): LlmClient {
-  const run = (ai.run as unknown as AiRun).bind(ai);
-  return {
-    model: MODEL,
-    async json(messages: ChatMessage[], schema: JsonSchema, opts?: { maxTokens?: number; seed?: number }) {
-      const res = await run(MODEL, {
-        messages,
-        response_format: { type: "json_schema", json_schema: schema },
-        temperature: 0,
-        seed: opts?.seed ?? BASE_SEED,
-        max_tokens: opts?.maxTokens ?? 1024,
-      });
-      if (res?.response === undefined || res.response === null) throw new Error("Workers AI returned no response.");
-      return res.response;
-    },
-  };
+  return createClient({
+    provider: mode,
+    apiKey: env.LLM_API_KEY,
+    model: env.LLM_MODEL,
+    baseUrl: env.LLM_BASE_URL,
+    cloudflareAccountId: env.CLOUDFLARE_ACCOUNT_ID,
+    timeoutMs: PROVIDER_TIMEOUT_MS,
+  });
 }
 
 // ---------------------------------------------------------------------------------------------

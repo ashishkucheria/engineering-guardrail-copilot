@@ -1,7 +1,7 @@
 // Google Gemini through the Interactions API, which Google recommends over the legacy
 // generateContent. JSON comes from response_format with a schema. `store: false` so Google doesn't
 // keep the reviewed code for later retrieval. Temperature isn't sent: current Gemini models ignore it.
-import type { LlmClient } from "../../core/llm.ts";
+import type { LlmClient } from "../llm.ts";
 import { MIN_MAX_TOKENS, postJson, ProviderError, type FetchFn } from "./http.ts";
 
 export const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
@@ -20,6 +20,23 @@ interface Step {
   content?: { type?: string; text?: unknown }[];
 }
 
+/**
+ * One text input for the Interactions API. With `store: false` there's no previous_interaction_id to
+ * continue from, and the docs don't show a format for passing earlier turns, so a conversation (the
+ * web app's review chat) is written out as a transcript ending with the question to answer. A
+ * single user message (every review and challenge call) goes as it is.
+ */
+export function geminiInput(turns: { role: string; content: string }[]): string {
+  if (turns.length === 1) return turns[0]!.content;
+  const said = turns.slice(0, -1).map((t) => `${t.role === "assistant" ? "Assistant" : "User"}:\n${t.content}`);
+  return [
+    "The conversation so far:",
+    ...said,
+    "Reply to the user's latest message, which follows. Answer only that message, in the JSON format required.",
+    `User:\n${turns.at(-1)!.content}`,
+  ].join("\n\n");
+}
+
 export function geminiClient(opts: GeminiOptions): LlmClient {
   const model = opts.model || GEMINI_DEFAULT_MODEL;
   return {
@@ -27,14 +44,13 @@ export function geminiClient(opts: GeminiOptions): LlmClient {
     async json(messages, schema, callOpts) {
       const system = messages.filter((m) => m.role === "system").map((m) => m.content).join("\n\n");
       const turns = messages.filter((m) => m.role !== "system");
-      // The Action only makes single-turn calls (detection). Multi-turn would need previous_interaction_id.
-      if (turns.length !== 1 || turns[0]!.role !== "user") throw new ProviderError("gemini: only single-turn requests are supported", undefined, false);
+      if (turns.length === 0 || turns.at(-1)!.role !== "user") throw new ProviderError("gemini: the last message must be from the user", undefined, false);
       const res = (await postJson(
         GEMINI_URL,
         { "x-goog-api-key": opts.apiKey, "api-revision": GEMINI_API_REVISION },
         {
           model,
-          input: turns[0]!.content,
+          input: geminiInput(turns),
           ...(system ? { system_instruction: system } : {}),
           response_format: { type: "text", mime_type: "application/json", schema },
           generation_config: {

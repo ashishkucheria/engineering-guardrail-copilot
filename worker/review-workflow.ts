@@ -10,7 +10,8 @@ import { NonRetryableError } from "cloudflare:workflows";
 import { chunkLabel, planChunks } from "../core/chunk.ts";
 import { parseInput } from "../core/diff.ts";
 import { capFindings, capGap, finalize } from "../core/engine.ts";
-import { BUDGET_REASON, describeDrops, detectChunk, llmStandards, seedFor, type ChunkResult } from "../core/llm.ts";
+import { BUDGET_REASON, describeDrops, detectChunk, llmStandards, seedFor, type ChunkResult, type LlmClient } from "../core/llm.ts";
+import { ProviderError } from "../core/providers/http.ts";
 import { runRules } from "../core/rules.ts";
 import type { Coverage, Finding } from "../core/types.ts";
 import { llmClient } from "./ai.ts";
@@ -80,15 +81,26 @@ export class ReviewWorkflow extends WorkflowEntrypoint<Env, ReviewParams> {
     // --- AI detection ------------------------------------------------------------------------
     const standards = llmStandards(enabled);
     const plan = planChunks(input);
-    const client = llmClient(env);
+    // No client when the review was submitted without AI, AI is off, or its configuration broke
+    // after submit; each makes the AI standards a coverage gap with its own reason.
+    let client: LlmClient | null = null;
+    let noAi = "AI review was turned off for this review";
+    if (ctx.ai) {
+      try {
+        client = llmClient(env);
+        noAi = "AI review is turned off";
+      } catch (e) {
+        noAi = `AI review unavailable: ${message(e).slice(0, 200)}`;
+      }
+    }
     const skipped: Coverage["skipped"] = rules.dropped ? [capGap(rules.dropped)] : [];
     const llmFindings: Finding[] = [];
 
     if (standards.length > 0 && plan.chunks.length > 0) {
       skipped.push(...plan.skipped);
       if (!client) {
-        skipped.push(...plan.chunks.map((c) => ({ file: chunkLabel(c), reason: "AI review is turned off" })));
-        await step.do("detect", DB_STEP, () => db.addEvent(env.DB, id, "detect", "skipped", null, "AI review is turned off (LLM_MODE=off)"));
+        skipped.push(...plan.chunks.map((c) => ({ file: chunkLabel(c), reason: noAi })));
+        await step.do("detect", DB_STEP, () => db.addEvent(env.DB, id, "detect", "skipped", null, noAi));
       } else {
         let budgetOut = false;
         for (const [i, chunk] of plan.chunks.entries()) {
@@ -111,6 +123,8 @@ export class ReviewWorkflow extends WorkflowEntrypoint<Env, ReviewParams> {
                 return res;
               } catch (e) {
                 await db.addEvent(env.DB, id, `detect:${label}`, "retry", Date.now() - t0, `attempt ${sctx.attempt}: ${message(e)}`).catch(() => {});
+                // A bad key, an unknown model or a rejected request won't succeed on a retry.
+                if (e instanceof ProviderError && !e.retryable) throw new NonRetryableError(message(e));
                 throw e;
               }
             });

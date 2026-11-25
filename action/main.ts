@@ -1,7 +1,7 @@
 // Entry point: runner environment in, review, outputs and exit code out. All the logic is in run.ts.
 import { readFileSync } from "node:fs";
 import { GitHubClient } from "./github.ts";
-import { PROVIDERS } from "./providers/index.ts";
+import { PROVIDERS } from "../core/providers/index.ts";
 import { appendJobSummary, error, getBoolean, getChoice, getInput, getPositiveInt, info, mask, setOutput, warning } from "./runner.ts";
 import { reviewPullRequest, type Inputs, type PrContext } from "./run.ts";
 

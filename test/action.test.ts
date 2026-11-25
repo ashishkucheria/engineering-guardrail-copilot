@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { GitHubClient, assembleDiff, type Annotation, type Comment, type DirEntry, type PullFile } from "../action/github.ts";
 import { readInputs, readPullRequest } from "../action/main.ts";
-import type { FetchFn } from "../action/providers/http.ts";
+import type { FetchFn } from "../core/providers/http.ts";
 import { parseExceptions } from "../action/exceptions.ts";
 import { annotationsFor, checkTitle, clean, countFindings, fingerprint, gate, inlineBody, MAX_INLINE_PER_RUN, planInline, renderSummary, staleBody, STALE_MARKER, SUMMARY_MARKER, type Report } from "../action/publish.ts";
 import { countingFetch, reviewPullRequest, syncInlineComments, uncheckedFiles, upsertSummaryComment, type Deps, type Inputs, type PrContext } from "../action/run.ts";

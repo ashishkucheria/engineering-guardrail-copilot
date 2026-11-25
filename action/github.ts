@@ -1,6 +1,6 @@
 // The GitHub REST calls the Action makes, over plain fetch (no Octokit). `fetch` is injectable.
 import { isGeneratedPath } from "../core/diff.ts";
-import { DEFAULT_TIMEOUT_MS, type FetchFn } from "./providers/http.ts";
+import { DEFAULT_TIMEOUT_MS, type FetchFn } from "../core/providers/http.ts";
 
 export class GitHubError extends Error {
   override name = "GitHubError";
