@@ -38284,7 +38284,7 @@ init_define_BUILTIN_STANDARDS();
 var MAX_INPUT_BYTES = 1e5;
 var MAX_FILES = 20;
 var SNIPPET_PATH = "snippet";
-var HUNK = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
+var HUNK = /^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
 function looksLikeDiff(input) {
   return /^diff --git /m.test(input) || /^--- /m.test(input) && /^\+\+\+ /m.test(input) || /^@@ -\d+/m.test(input);
 }
@@ -38338,6 +38338,8 @@ function splitDiffFiles(text) {
   let cur = null;
   let newLine = 0;
   let inHunk = false;
+  let oldLeft = 0;
+  let newLeft = 0;
   const start = (path4) => {
     cur = { path: path4, lines: [], deleted: false, binary: false };
     out.push(cur);
@@ -38354,7 +38356,8 @@ function splitDiffFiles(text) {
       headerOpen = true;
       continue;
     }
-    if (line.startsWith("--- ") && all[i + 1]?.startsWith("+++ ")) {
+    const insideHunk = inHunk && oldLeft > 0 && newLeft > 0;
+    if (!insideHunk && line.startsWith("--- ") && all[i + 1]?.startsWith("+++ ")) {
       const target = all[i + 1].slice(4).trim();
       if (!headerOpen) start(stripPrefix(target === "/dev/null" ? line.slice(4) : target));
       headerOpen = false;
@@ -38379,15 +38382,22 @@ function splitDiffFiles(text) {
     }
     const hunk = HUNK.exec(line);
     if (hunk) {
-      newLine = Number(hunk[1]);
+      oldLeft = hunk[1] === void 0 ? 1 : Number(hunk[1]);
+      newLine = Number(hunk[2]);
+      newLeft = hunk[3] === void 0 ? 1 : Number(hunk[3]);
       inHunk = true;
       continue;
     }
     if (!inHunk) continue;
-    if (line.startsWith("+")) c.lines.push({ n: newLine++, text: line.slice(1), added: true });
-    else if (line.startsWith(" ")) c.lines.push({ n: newLine++, text: line.slice(1), added: false });
-    else if (line === "") c.lines.push({ n: newLine++, text: "", added: false });
-    else if (line.startsWith("-") || line.startsWith("\\")) continue;
+    if (line.startsWith("+")) {
+      c.lines.push({ n: newLine++, text: line.slice(1), added: true });
+      newLeft--;
+    } else if (line.startsWith(" ") || line === "") {
+      c.lines.push({ n: newLine++, text: line.slice(1), added: false });
+      oldLeft--;
+      newLeft--;
+    } else if (line.startsWith("-")) oldLeft--;
+    else if (line.startsWith("\\")) continue;
     else inHunk = false;
   }
   return out;
@@ -38584,12 +38594,17 @@ function chunk(items, size) {
   for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
   return out;
 }
+var CONTROL = /[\u0000-\u001f\u007f]/;
 function assembleDiff(files) {
   const parts = [];
   const gaps = [];
   for (const f of files) {
     if (f.status === "removed") continue;
     const from = f.previous_filename ?? f.filename;
+    if (CONTROL.test(f.filename) || CONTROL.test(from)) {
+      gaps.push({ file: f.filename, reason: "file name has control characters" });
+      continue;
+    }
     const header = [`diff --git a/${from} b/${f.filename}`, `--- a/${from}`, `+++ b/${f.filename}`];
     if (f.patch) {
       parts.push([...header, f.patch.endsWith("\n") ? f.patch.slice(0, -1) : f.patch].join("\n"));
@@ -39589,10 +39604,10 @@ function countFindings(findings) {
     suggestions: findings.filter((f) => f.classification === "suggestion").length
   };
 }
-function gate(verdict, counts, failOn, failOnIncomplete) {
+function gate(incomplete, counts, failOn, failOnIncomplete) {
   if (failOn === "blocker" && counts.blockers > 0) return "failure";
   if (failOn === "major" && counts.blockers + counts.majors > 0) return "failure";
-  if (verdict === "incomplete") return failOnIncomplete ? "failure" : "neutral";
+  if (incomplete) return failOnIncomplete ? "failure" : "neutral";
   return counts.violations > 0 ? "neutral" : "success";
 }
 var plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
@@ -39601,10 +39616,11 @@ function checkTitle(verdict, c) {
   if (c.blockers) parts.push(`${c.blockers} blocker${c.blockers === 1 ? "" : "s"}`);
   return `${verdict}: ${parts.join(", ")}`;
 }
+var ZWSP = "\u200B";
 function clean(text, max = 400) {
   const flat = text.replace(/\s+/g, " ").trim();
   const cut = flat.length > max ? `${flat.slice(0, max)}\u2026` : flat;
-  return cut.replace(/[<>[\]|]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "[": "\\[", "]": "\\]", "|": "\\|" })[c]).replace(/@/g, "@\u200B").replace(/`/g, "'");
+  return cut.replace(/[<>[\]|]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "[": "\\[", "]": "\\]", "|": "\\|" })[c]).replace(/@/g, `@${ZWSP}`).replace(/:\/\//g, `:${ZWSP}//`).replace(/\bwww\./gi, `www${ZWSP}.`).replace(/#(?=\d)/g, `#${ZWSP}`).replace(/\bGH-(?=\d)/gi, `GH${ZWSP}-`).replace(/`/g, "'");
 }
 var place = (f) => `${f.file}:${f.lineStart}${f.lineEnd > f.lineStart ? `-${f.lineEnd}` : ""}`;
 var LEVEL = { blocker: "failure", major: "warning", minor: "notice" };
@@ -39632,7 +39648,7 @@ function renderSummary(r, opts = {}) {
     `${plural(c.violations, "violation")}${c.blockers ? ` (${c.blockers} blocker${c.blockers === 1 ? "" : "s"})` : ""}, ${plural(c.suggestions, "suggestion")}. ${r.waived?.length ? `${r.waived.length} waived by exceptions. ` : ""}${r.coverage.filesReviewed} of ${plural(r.coverage.filesTotal, "file")} reviewed. Check conclusion: **${r.conclusion}**.`,
     ""
   );
-  const how = [r.provider === "none" ? "Rules only (`provider: none`)" : `Rules and AI (\`${clean(r.provider)}\`${r.model ? `, \`${clean(r.model)}\`` : ""})`];
+  const how = [r.provider === "none" ? r.aiNote ? "Rules only" : "Rules only (`provider: none`)" : `Rules and AI (\`${clean(r.provider)}\`${r.model ? `, \`${clean(r.model)}\`` : ""})`];
   how.push(r.standardsSource === "repository" ? "standards from this repository's base commit" : "built-in standards");
   out.push(`${how.join("; ")}. Commit \`${r.headSha.slice(0, 7)}\`.`, "");
   if (r.standardsChanged) out.push("> This pull request changes the standards folder. It was reviewed against the standards at the base commit, so the change takes effect after it merges.", "");
@@ -39834,7 +39850,8 @@ async function reviewPullRequest(pr, inputs, deps) {
     parsed = r.input;
   }
   const counts = countFindings(findings);
-  const conclusion = gate(verdict, counts, inputs.failOn, inputs.failOnIncomplete);
+  const incomplete = coverage.skipped.length > 0;
+  const conclusion = gate(incomplete, counts, inputs.failOn, inputs.failOnIncomplete);
   const report = {
     verdict,
     findings,
@@ -39871,13 +39888,13 @@ async function reviewPullRequest(pr, inputs, deps) {
       );
     }
     if (inputs.summaryComment) await attempt(deps, "summary comment", () => upsertSummaryComment(gh, pr.number, markdown));
-    if (inputs.inlineComments && parsed) {
-      const input = parsed;
+    if (inputs.inlineComments) {
+      const input = parsed ?? { kind: "diff", files: [], coverage };
       const unchecked = uncheckedFiles(coverage.skipped, files.map((f) => f.filename));
       await attempt(deps, "inline comments", async () => deps.info(await syncInlineComments(gh, pr, findings, input, unchecked)));
     }
   }
-  return { verdict, counts, conclusion, incomplete: verdict === "incomplete", summary: markdown };
+  return { verdict, counts, conclusion, incomplete, summary: markdown };
 }
 async function attempt(deps, what, fn) {
   try {

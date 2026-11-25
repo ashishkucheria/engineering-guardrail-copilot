@@ -57,6 +57,7 @@ export interface Outcome {
   verdict: Verdict;
   counts: Counts;
   conclusion: Conclusion;
+  /** Part of the pull request couldn't be reviewed. True alongside a `fail` verdict too. */
   incomplete: boolean;
   summary: string;
 }
@@ -137,7 +138,9 @@ export async function reviewPullRequest(pr: PrContext, inputs: Inputs, deps: Dep
   }
 
   const counts = countFindings(findings);
-  const conclusion = gate(verdict, counts, inputs.failOn, inputs.failOnIncomplete);
+  // Not `verdict === "incomplete"`: a blocker makes the verdict `fail` even when code went unread.
+  const incomplete = coverage.skipped.length > 0;
+  const conclusion = gate(incomplete, counts, inputs.failOn, inputs.failOnIncomplete);
   const report = {
     verdict,
     findings,
@@ -175,14 +178,15 @@ export async function reviewPullRequest(pr: PrContext, inputs: Inputs, deps: Dep
       );
     }
     if (inputs.summaryComment) await attempt(deps, "summary comment", () => upsertSummaryComment(gh, pr.number, markdown));
-    if (inputs.inlineComments && parsed) {
-      const input = parsed;
+    if (inputs.inlineComments) {
+      // With nothing left to read there are no findings, and earlier comments still need marking.
+      const input: ParsedInput = parsed ?? { kind: "diff", files: [], coverage };
       const unchecked = uncheckedFiles(coverage.skipped, files.map((f) => f.filename));
       await attempt(deps, "inline comments", async () => deps.info(await syncInlineComments(gh, pr, findings, input, unchecked)));
     }
   }
 
-  return { verdict, counts, conclusion, incomplete: verdict === "incomplete", summary: markdown };
+  return { verdict, counts, conclusion, incomplete, summary: markdown };
 }
 
 async function attempt(deps: Deps, what: string, fn: () => Promise<unknown>): Promise<void> {

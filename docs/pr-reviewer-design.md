@@ -1,6 +1,7 @@
 # Design: Guardrail PR reviewer (GitHub Action)
 
-Status: **draft for review.** All decisions are made and marked *(decided)*; nothing is implemented yet.
+Status: **built.** The three parts in §11 are merged; this document describes what runs. Not yet tried
+against the real AI providers, and inline comments not yet on a real pull request (README, "Status").
 
 ## 1. Goal
 
@@ -59,7 +60,7 @@ No `actions/checkout` is needed: the Action reads the diff and the standards thr
 
 | Input | Default | Meaning |
 |---|---|---|
-| `provider` | *(required)* | `openai-compatible`, `anthropic`, `gemini`, `workers-ai` or `none` (rules only) |
+| `provider` | `none` | `openai-compatible`, `anthropic`, `gemini`, `workers-ai` or `none` (rules only) |
 | `model` | per provider (§5) | Model name |
 | `api-key` | *(required unless `none`)* | Provider key, from a secret |
 | `base-url` | `https://api.openai.com/v1` | `openai-compatible` only |
@@ -72,7 +73,7 @@ No `actions/checkout` is needed: the Action reads the diff and the standards thr
 | `inline-comments` | `false` | Comment on each violation's line |
 | `max-ai-calls` | `20` | Upper bound on provider requests per run, retries and step-downs included |
 | `max-files` | `50` | Files reviewed per pull request; the rest are listed as not reviewed |
-| `github-token` | `${{ github.token }}` | Token for reading the PR and writing results |
+| `github-token` | `${{ github.token }}` | Token for reading the PR and writing results. The workflow's token or a GitHub App's: the Action's own comments are recognised by their `Bot` author, so a personal access token would repeat them on every push |
 
 Outputs: `verdict`, `violations`, `blockers`, `incomplete`, for later steps.
 
@@ -173,7 +174,9 @@ Everything posted is redacted the same way as in the app: the comment is public 
 | `blocker` | `failure` if the verdict is `fail` |
 | `major` | `failure` if there is any blocker or major violation |
 
-`incomplete` gives `neutral`, or `failure` with `fail-on-incomplete: true`. An exception-waived finding never
+A review with coverage gaps gives `neutral`, or `failure` with `fail-on-incomplete: true`. This follows the
+coverage, not the verdict: a blocker makes the verdict `fail` whatever was read, and must not hide unread code
+from `fail-on-incomplete` (the `incomplete` output is `true` then too). An exception-waived finding never
 fails the check. With `blocker` or `major`, a run that doesn't fail but has violations is `neutral`, as with
 `none`. The job's own exit code follows the conclusion, so a required status works either way.
 
@@ -189,7 +192,13 @@ fails the check. With `blocker` or `major`, a run that doesn't fail but has viol
 - **`provider: none` is a choice, not a gap.** The verdict isn't `incomplete` because of it; the summary lists the
   standards that need AI and weren't checked.
 - **Escaping.** The model's text goes into comments only after it is flattened to one line, with HTML tags, links,
-  table pipes and backticks neutralised and `@` mentions broken, since a PR comment is public and renders them.
+  table pipes and backticks neutralised, and `@` mentions, bare URLs and issue references (`#12`, `GH-12`)
+  broken with a zero-width space, since a PR comment is public and GitHub makes all of them live (a mention
+  notifies, a reference posts a backlink on the issue it names). Checked against GitHub's Markdown API.
+- **The diff is rebuilt from data the PR author controls.** File names with control characters aren't put into
+  a diff header (a gap instead), and the parser reads `--- x` / `+++ y` inside a hunk as a removed and an added
+  line, not a file header. Otherwise a change could move the rest of its own file to another path: one the
+  model skips (`vendor/`), or one an exception waives.
 - **The summary comment is found by its marker among the Action's own comments only** (author type `Bot`), so a
   person's comment containing the marker is never edited.
 - **Standards from the base commit** (§4 step 2), so a PR can't weaken the rules it is checked against.

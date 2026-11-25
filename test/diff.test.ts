@@ -33,6 +33,18 @@ describe("parseInput", () => {
     expect(p.files[1]!.lines).toEqual([{ n: 5, text: "y", added: true }]);
   });
 
+  it("reads '--- x' then '+++ y' inside a hunk as a removed and an added line, not as a file header", () => {
+    // Changing the line "-- a/x" to "++ b/vendor/y.ts" must not move the rest of the file to vendor/y.ts
+    const p = parseInput(
+      diff("diff --git a/src/a.ts b/src/a.ts", "--- a/src/a.ts", "+++ b/src/a.ts", "@@ -1,2 +1,2 @@", " keep", "--- a/x", "+++ b/vendor/y.ts", "@@ -9,1 +9,2 @@", " ctx", "+later"),
+    );
+    expect(p.files.map((f) => f.path)).toEqual(["src/a.ts"]);
+    expect(p.files[0]!.lines.map((l) => `${l.n}${l.added ? "+" : " "}${l.text}`)).toEqual(["1 keep", "2+++ b/vendor/y.ts", "9 ctx", "10+later"]);
+  });
+  it("still reads a header after a hunk whose counts are short or missing", () => {
+    const p = parseInput(diff("--- a/one.ts", "+++ b/one.ts", "@@ -1 +1 @@", "+a", "+b", "--- a/two.ts", "+++ b/two.ts", "@@ -3,9 +3,9 @@", "+c"));
+    expect(p.files.map((f) => f.path)).toEqual(["one.ts", "two.ts"]);
+  });
   it("ignores deleted files and lists binary files as not reviewed, without a coverage gap", () => {
     const p = parseInput(
       diff(

@@ -148,7 +148,9 @@ the real services; `npm run try:provider -- <provider>` does that with your key 
 - The job summary, and the outputs `verdict`, `violations`, `blockers` and `incomplete`.
 
 The check is **advisory** unless you set `fail-on`: `blocker` fails it on any blocker, `major` on any blocker or
-major. An `incomplete` review (a file or a chunk couldn't be read) is neutral unless `fail-on-incomplete: true`.
+major. A review with unread code (a file or a chunk couldn't be read) is neutral unless `fail-on-incomplete: true`.
+That holds when the verdict is `fail` too: a blocker doesn't hide the unread code, and the `incomplete` output is
+`true` whenever part of the pull request went unreviewed.
 Binary files (images, fonts) aren't a gap: no standard reads them, and the summary lists them as not reviewed.
 Make the check required in branch protection if you want it to block merges.
 
@@ -169,7 +171,7 @@ Make the check required in branch protection if you want it to block merges.
 | `inline-comments` | `false` | Comment on each new violation's line |
 | `max-ai-calls` | `20` | Upper bound on provider requests per run, retries included |
 | `max-files` | `50` | Files reviewed per pull request; the rest are listed as not reviewed |
-| `github-token` | `github.token` | Token for reading the pull request and writing results |
+| `github-token` | `github.token` | Token for reading the pull request and writing results. Use the workflow's token or a GitHub App's: the Action recognises its own comments by their bot author, so with a personal access token it would post new comments on every push |
 
 ### Your standards
 
@@ -208,8 +210,8 @@ listed in the summary, so it stays visible.
   as a Dependabot run. Under `pull_request_target` the secrets exist, so a fork's pull request is reviewed in full.
 - **The changed code is sent to the AI provider you choose.** With `provider: none` nothing leaves the runner, and
   the verdict isn't `incomplete` because of it; the summary lists the standards that needed AI.
-- Secrets quoted in findings are redacted, and the model's text is neutralised (HTML, links, `@` mentions) before
-  it goes into a comment.
+- Secrets quoted in findings are redacted, and the model's text is neutralised before it goes into a comment:
+  HTML, Markdown links, bare URLs, `@` mentions and issue references like `#12` are all left as plain text.
 - Inline comments for **AI** findings may repeat or churn: the fingerprint hashes the code the model quoted, and
   the model can quote a slightly different span on the next push, which reads as one finding gone and a new one.
   Rule findings are stable. This hasn't been measured against a real model. A comment someone *deletes* is posted
