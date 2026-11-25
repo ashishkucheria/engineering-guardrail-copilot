@@ -136,8 +136,9 @@ checks out or runs the pull request's code. `v1` is the released tag; pin a comm
 version that can never change under you.
 
 **Status.** Tested against a mocked GitHub and mocked providers, as a built bundle against a local fake GitHub, and
-on this repository's own pull requests with `provider: none`. The four provider adapters haven't been run against
-the real services; `npm run try:provider -- <provider>` does that with your key (see
+on this repository's own pull requests with `provider: none`. The Action hasn't run with a real provider. Of its four
+provider clients, only Gemini's has been called against the real service, from the web app, which shares them;
+`npm run try:provider -- <provider>` runs one with your key (see
 [`scripts/try-provider.ts`](scripts/try-provider.ts)).
 
 ### What it writes
@@ -373,8 +374,10 @@ docs/        build notes: the design and the prompt history
   coverage gap. What a call costs depends on the provider and model.
 - With AI ticked, the submitted code goes to the configured provider. Gemini requests are sent with `store: false`,
   but on Gemini's free tier Google may use the content to improve its products; use a paid key for real code.
-- Only Workers AI (Llama 3.3) has been measured by the eval and checked end to end in the app. The other providers
-  share the Action's tested clients, but haven't been run against the real services from the web app.
+- Only Workers AI (Llama 3.3) has been measured by the eval. In the app, Workers AI was checked end to end when
+  deployed, and Gemini (`gemini-3.5-flash-lite`) in local dev on 2026-11-25: a review, a challenge and a two-message
+  chat, with one HTTP 503 retried. Anthropic and OpenAI-compatible share the Action's tested clients, but haven't
+  been run against the real services.
 - A "disputed" challenge comes from a model reading the developer's own argument, so it can be steered. It never
   changes the verdict, and it shouldn't be read as a confirmed false positive.
 - The 1 MiB limit on Workflow step output isn't enforced in local dev. Findings are capped inside the steps, but
