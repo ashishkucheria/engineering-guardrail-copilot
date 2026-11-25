@@ -43,6 +43,11 @@ export function ReviewResult({ review, showSnapshot = false, onChanged }: { revi
             "pass" while code is unread.
           </div>
         )}
+        {cov?.notReviewed && cov.notReviewed.length > 0 && (
+          <p className="muted small">
+            Not reviewed (no standard reads them): {cov.notReviewed.map((s) => `${s.file} (${s.reason})`).join(", ")}.
+          </p>
+        )}
         {review.error && <div className="error">The review failed: {review.error}</div>}
       </section>
 

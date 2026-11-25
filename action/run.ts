@@ -177,7 +177,8 @@ export async function reviewPullRequest(pr: PrContext, inputs: Inputs, deps: Dep
     if (inputs.summaryComment) await attempt(deps, "summary comment", () => upsertSummaryComment(gh, pr.number, markdown));
     if (inputs.inlineComments && parsed) {
       const input = parsed;
-      await attempt(deps, "inline comments", async () => deps.info(await syncInlineComments(gh, pr, findings, input, coverage.skipped.length === 0)));
+      const unchecked = uncheckedFiles(coverage.skipped, files.map((f) => f.filename));
+      await attempt(deps, "inline comments", async () => deps.info(await syncInlineComments(gh, pr, findings, input, unchecked)));
     }
   }
 
@@ -215,16 +216,17 @@ function waivedFindings(findings: Finding[], exceptions: LoadedExceptions): Waiv
  * has no API to mark a comment outdated), and put back if the finding returns. People's comments are
  * never touched.
  *
- * A finding missing from a run that couldn't check everything (`complete` false: the AI failed, or
- * max-ai-calls was reached) isn't known to be gone, so no comment is marked then.
+ * A finding missing from a file this run couldn't fully check (`unchecked`: the AI failed on it, or
+ * max-ai-calls was reached) isn't known to be gone, so comments on that file are left as they are;
+ * "all" leaves every comment.
  */
-export async function syncInlineComments(gh: Pick<GitHubClient, "listReviewComments" | "createReview" | "updateReviewComment">, pr: PrContext, findings: Finding[], input: ParsedInput, complete = true): Promise<string> {
+export async function syncInlineComments(gh: Pick<GitHubClient, "listReviewComments" | "createReview" | "updateReviewComment">, pr: PrContext, findings: Finding[], input: ParsedInput, unchecked: ReadonlySet<string> | "all" = new Set()): Promise<string> {
   const commentable = new Map(input.files.map((f) => [f.path, new Set(f.lines.map((l) => l.n))]));
   const plan = planInline(findings, commentable);
-  const mine = new Map<string, { id: number; body: string }>();
+  const mine = new Map<string, { id: number; body: string; path?: string }>();
   for (const c of await gh.listReviewComments(pr.number)) {
     const fp = c.user?.type === "Bot" ? fingerprintOf(c.body) : null;
-    if (fp && c.body !== undefined) mine.set(fp, { id: c.id, body: c.body });
+    if (fp && c.body !== undefined) mine.set(fp, { id: c.id, body: c.body, path: c.path });
   }
 
   let restored = 0;
@@ -236,15 +238,36 @@ export async function syncInlineComments(gh: Pick<GitHubClient, "listReviewComme
       restored++;
     }
   }
-  for (const [fp, old] of complete ? mine : []) {
-    if (!plan.current.has(fp) && !old.body.includes(STALE_MARKER)) {
-      await gh.updateReviewComment(old.id, staleBody(old.body, pr.headSha));
-      staled++;
+  let kept = 0;
+  for (const [fp, old] of mine) {
+    if (plan.current.has(fp) || old.body.includes(STALE_MARKER)) continue;
+    // A comment without a path can't be placed, so with any gap it's kept too
+    if (unchecked === "all" || (unchecked.size > 0 && (old.path === undefined || unchecked.has(old.path)))) {
+      kept++;
+      continue;
     }
+    await gh.updateReviewComment(old.id, staleBody(old.body, pr.headSha));
+    staled++;
   }
   const fresh = plan.candidates.filter((c) => !mine.has(c.fingerprint));
   const posting = fresh.slice(0, MAX_INLINE_PER_RUN);
   if (posting.length) await gh.createReview(pr.number, pr.headSha, posting.map((c) => c.comment));
   const left = fresh.length - posting.length;
-  return `Inline comments: ${posting.length} new${left ? ` (${left} more not posted: ${MAX_INLINE_PER_RUN} per run, see the summary)` : ""}, ${staled} marked no longer reported${complete ? "" : " (none: the review was incomplete, so a missing finding isn't known to be gone)"}, ${restored} restored.`;
+  return `Inline comments: ${posting.length} new${left ? ` (${left} more not posted: ${MAX_INLINE_PER_RUN} per run, see the summary)` : ""}, ${staled} marked no longer reported${kept ? ` (${kept} left as is: ${unchecked === "all" ? "the review was incomplete" : "their file wasn't fully checked"}, so the finding isn't known to be gone)` : ""}, ${restored} restored.`;
+}
+
+/**
+ * The changed files a coverage gap leaves not fully checked, so an inline comment on one isn't marked
+ * as gone. An AI chunk's gap names its file as `path#part/parts`. "all" when a gap isn't about one
+ * changed file (findings dropped over the cap, AI standards unavailable).
+ */
+export function uncheckedFiles(skipped: Coverage["skipped"], changed: string[]): ReadonlySet<string> | "all" {
+  const paths = new Set(changed);
+  const out = new Set<string>();
+  for (const g of skipped) {
+    const file = g.file.replace(/#\d+\/\d+$/, "");
+    if (!paths.has(file)) return "all";
+    out.add(file);
+  }
+  return out;
 }

@@ -9,7 +9,7 @@ import { readInputs, readPullRequest } from "../action/main.ts";
 import type { FetchFn } from "../action/providers/http.ts";
 import { parseExceptions } from "../action/exceptions.ts";
 import { annotationsFor, checkTitle, clean, codeBlock, countFindings, fingerprint, gate, inlineBody, MAX_INLINE_PER_RUN, planInline, renderSummary, staleBody, STALE_MARKER, SUMMARY_MARKER, type Report } from "../action/publish.ts";
-import { countingFetch, reviewPullRequest, syncInlineComments, upsertSummaryComment, type Deps, type Inputs, type PrContext } from "../action/run.ts";
+import { countingFetch, reviewPullRequest, syncInlineComments, uncheckedFiles, upsertSummaryComment, type Deps, type Inputs, type PrContext } from "../action/run.ts";
 import { getBoolean, getChoice, getInput, getPositiveInt, setOutput } from "../action/runner.ts";
 import { loadStandards } from "../action/standards.ts";
 import type { LlmClient } from "../core/llm.ts";
@@ -603,7 +603,7 @@ describe("inline comments", () => {
   });
 
   const input = (): ParsedInput => ({ kind: "diff", files: [{ path: "a.ts", isTest: false, lines: [5, 6].map((n) => ({ n, text: "x", added: true })) }], coverage: { filesTotal: 1, filesReviewed: 1, skipped: [] } });
-  const api = (existing: { id: number; body?: string; user?: { type: string } }[] = []) => {
+  const api = (existing: { id: number; body?: string; user?: { type: string }; path?: string }[] = []) => {
     const log = { reviews: [] as { commitId: string; comments: { path: string; line: number; body: string }[] }[], edits: [] as { id: number; body: string }[] };
     const gh = {
       listReviewComments: async () => existing,
@@ -637,15 +637,33 @@ describe("inline comments", () => {
     expect(log.edits.map((e) => e.id)).toEqual([1]);
     expect(log.edits[0]!.body).toContain(STALE_MARKER);
   });
-  it("marks nothing when the review was incomplete: a finding the run couldn't look for isn't known to be gone", async () => {
-    const { gh, log } = api([{ id: 1, body: inlineBody(f()), user: { type: "Bot" } }]);
-    const msg = await syncInlineComments(gh, pr(), [], input(), false);
+  it("finds the files a gap leaves unchecked: an AI chunk names its file, a gap about no one file means all", () => {
+    const changed = ["src/a.ts", "src/b.ts", "logo.png"];
+    expect(uncheckedFiles([], changed)).toEqual(new Set());
+    expect(uncheckedFiles([{ file: "src/a.ts#2/3", reason: "AI review failed: HTTP 503" }, { file: "src/b.ts", reason: "over the 100 KB per-file limit" }], changed)).toEqual(new Set(["src/a.ts", "src/b.ts"]));
+    expect(uncheckedFiles([{ file: "(whole review)", reason: "3 finding(s) over the cap were dropped" }], changed)).toBe("all");
+    expect(uncheckedFiles([{ file: "AI standards", reason: "AI review unavailable" }], changed)).toBe("all");
+  });
+  it("leaves a comment alone when its file wasn't fully checked, and marks one on a file that was", async () => {
+    const onA = f({ file: "src/a.ts" });
+    const { gh, log } = api([
+      { id: 1, body: inlineBody(onA), user: { type: "Bot" }, path: "src/a.ts" },
+      { id: 2, body: inlineBody(f()), user: { type: "Bot" }, path: f().file },
+      { id: 3, body: inlineBody(f({ standardId: "REL-002" })), user: { type: "Bot" } },
+    ]);
+    const msg = await syncInlineComments(gh, pr(), [], input(), new Set(["src/a.ts"]));
+    expect(log.edits.map((e) => e.id)).toEqual([2]);
+    expect(msg).toContain("1 marked no longer reported (2 left as is: their file wasn't fully checked");
+  });
+  it("marks nothing when a gap covers the whole review", async () => {
+    const { gh, log } = api([{ id: 1, body: inlineBody(f()), user: { type: "Bot" }, path: f().file }]);
+    const msg = await syncInlineComments(gh, pr(), [], input(), "all");
     expect(log.edits).toEqual([]);
-    expect(msg).toContain("0 marked no longer reported (none: the review was incomplete");
+    expect(msg).toContain("0 marked no longer reported (1 left as is: the review was incomplete");
   });
   it("still restores and posts on an incomplete review: those findings are present", async () => {
     const { gh, log } = api([{ id: 1, body: staleBody(inlineBody(f()), "aaaaaaa"), user: { type: "Bot" } }]);
-    await syncInlineComments(gh, pr(), [f(), f({ standardId: "REL-002", lineStart: 6, lineEnd: 6, evidence: "q" })], input(), false);
+    await syncInlineComments(gh, pr(), [f(), f({ standardId: "REL-002", lineStart: 6, lineEnd: 6, evidence: "q" })], input(), "all");
     expect(log.edits).toEqual([{ id: 1, body: inlineBody(f()) }]);
     expect(log.reviews[0]!.comments).toHaveLength(1);
   });
@@ -653,7 +671,7 @@ describe("inline comments", () => {
     const files = [added("src/api.ts", "export function f() {", `  ${FETCH_LINE}`, "}")];
     // A comment an earlier run posted for an AI finding on this line
     const earlier = finding({ standardId: "REL-002", severity: "major", source: "llm", file: "src/api.ts", lineStart: 2, lineEnd: 2, evidence: FETCH_LINE });
-    const existing = [{ id: 9, body: inlineBody(earlier), user: { type: "Bot" } }];
+    const existing = [{ id: 9, body: inlineBody(earlier), user: { type: "Bot" }, path: "src/api.ts" }];
     const failing: Deps["makeClient"] = () => ({ model: "m", json: async () => { throw Object.assign(new Error("HTTP 503"), { retryable: true }); } });
     const outage = harness({ files, makeClient: failing });
     outage.deps.github.listReviewComments = async () => existing;
@@ -664,6 +682,17 @@ describe("inline comments", () => {
     clean.deps.github.listReviewComments = async () => existing;
     await reviewPullRequest(pr(), inputs({ provider: "openai-compatible", apiKey: KEY, inlineComments: true }), clean.deps);
     expect(clean.rec.edited.map((e) => e.id)).toEqual([9]);
+  });
+  it("end to end: an image in the pull request is listed, doesn't make it incomplete, and doesn't stop marking", async () => {
+    const fixed = finding({ standardId: "SEC-001", severity: "blocker", source: "rule", file: "src/a.ts", lineStart: 1, lineEnd: 1, evidence: "x" });
+    const h = harness({ files: [added("src/a.ts", "export const ok = 1;"), { filename: "logo.png", status: "added", changes: 0 }] });
+    h.deps.github.listReviewComments = async () => [{ id: 7, body: inlineBody(fixed), user: { type: "Bot" }, path: "src/a.ts" }];
+    const r = await reviewPullRequest(pr(), inputs({ inlineComments: true }), h.deps);
+    expect(r.verdict).toBe("pass");
+    expect(h.rec.edited.map((e) => e.id)).toEqual([7]);
+    expect(h.rec.summaries[0]).toContain("### Not reviewed");
+    expect(h.rec.summaries[0]).toContain("`logo.png`: binary file");
+    expect(h.rec.summaries[0]).not.toContain("Not fully reviewed");
   });
   it("restores a stale comment when its finding comes back, without posting a duplicate", async () => {
     const { gh, log } = api([{ id: 1, body: staleBody(inlineBody(f()), "aaaaaaa"), user: { type: "Bot" } }]);

@@ -200,8 +200,8 @@ export interface AssembledDiff {
 /**
  * Join the per-file patches of `pulls/{n}/files` into one unified diff. Deleted files are left out.
  * A file without a patch is either binary (GitHub reports no changed lines for it) or too large for
- * GitHub to include; the first becomes the "binary file" gap parseInput already records, the second
- * a gap returned here. Generated files (lock files, `dist/`) are the exception: with no patch they are
+ * GitHub to include; the first becomes a binary file parseInput lists as not reviewed (not a gap), the
+ * second a gap returned here. Generated files (lock files, `dist/`) are the exception: with no patch they are
  * skipped without a gap, as they would be with one.
  */
 export function assembleDiff(files: PullFile[]): AssembledDiff {

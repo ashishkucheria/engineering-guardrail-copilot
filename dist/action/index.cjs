@@ -38317,7 +38317,7 @@ function parseInput(input, limits = {}) {
     if (f.deleted) continue;
     coverage.filesTotal++;
     if (f.binary) {
-      coverage.skipped.push({ file: f.path, reason: "binary file" });
+      (coverage.notReviewed ??= []).push({ file: f.path, reason: "binary file" });
       continue;
     }
     if (files.length >= maxFiles) {
@@ -39673,6 +39673,13 @@ function renderSummary(r, opts = {}) {
     if (r.coverage.skipped.length > MAX_GAPS) out.push(`- \u2026and ${r.coverage.skipped.length - MAX_GAPS} more`);
     out.push("");
   }
+  const notReviewed = r.coverage.notReviewed ?? [];
+  if (notReviewed.length) {
+    out.push("### Not reviewed", "", "No standard reads these files, so they don't make the review incomplete.", "");
+    for (const g of notReviewed.slice(0, MAX_GAPS)) out.push(`- \`${clean(g.file, 120)}\`: ${clean(g.reason, 200)}`);
+    if (notReviewed.length > MAX_GAPS) out.push(`- \u2026and ${notReviewed.length - MAX_GAPS} more`);
+    out.push("");
+  }
   if (!violations.length && !suggestions.length && !r.coverage.skipped.length) out.push("No findings.", "");
   const md = out.join("\n").trimEnd();
   return md.length > MAX_MARKDOWN ? `${md.slice(0, MAX_MARKDOWN)}
@@ -39866,7 +39873,8 @@ async function reviewPullRequest(pr, inputs, deps) {
     if (inputs.summaryComment) await attempt(deps, "summary comment", () => upsertSummaryComment(gh, pr.number, markdown));
     if (inputs.inlineComments && parsed) {
       const input = parsed;
-      await attempt(deps, "inline comments", async () => deps.info(await syncInlineComments(gh, pr, findings, input, coverage.skipped.length === 0)));
+      const unchecked = uncheckedFiles(coverage.skipped, files.map((f) => f.filename));
+      await attempt(deps, "inline comments", async () => deps.info(await syncInlineComments(gh, pr, findings, input, unchecked)));
     }
   }
   return { verdict, counts, conclusion, incomplete: verdict === "incomplete", summary: markdown };
@@ -39891,13 +39899,13 @@ function waivedFindings(findings, exceptions) {
     return e ? [{ finding: f, exceptionId: e.id, reason: e.reason, approvedBy: e.approvedBy, expires: e.expires }] : [];
   });
 }
-async function syncInlineComments(gh, pr, findings, input, complete = true) {
+async function syncInlineComments(gh, pr, findings, input, unchecked = /* @__PURE__ */ new Set()) {
   const commentable = new Map(input.files.map((f) => [f.path, new Set(f.lines.map((l) => l.n))]));
   const plan = planInline(findings, commentable);
   const mine = /* @__PURE__ */ new Map();
   for (const c of await gh.listReviewComments(pr.number)) {
     const fp = c.user?.type === "Bot" ? fingerprintOf(c.body) : null;
-    if (fp && c.body !== void 0) mine.set(fp, { id: c.id, body: c.body });
+    if (fp && c.body !== void 0) mine.set(fp, { id: c.id, body: c.body, path: c.path });
   }
   let restored = 0;
   let staled = 0;
@@ -39908,17 +39916,31 @@ async function syncInlineComments(gh, pr, findings, input, complete = true) {
       restored++;
     }
   }
-  for (const [fp, old] of complete ? mine : []) {
-    if (!plan.current.has(fp) && !old.body.includes(STALE_MARKER)) {
-      await gh.updateReviewComment(old.id, staleBody(old.body, pr.headSha));
-      staled++;
+  let kept = 0;
+  for (const [fp, old] of mine) {
+    if (plan.current.has(fp) || old.body.includes(STALE_MARKER)) continue;
+    if (unchecked === "all" || unchecked.size > 0 && (old.path === void 0 || unchecked.has(old.path))) {
+      kept++;
+      continue;
     }
+    await gh.updateReviewComment(old.id, staleBody(old.body, pr.headSha));
+    staled++;
   }
   const fresh = plan.candidates.filter((c) => !mine.has(c.fingerprint));
   const posting = fresh.slice(0, MAX_INLINE_PER_RUN);
   if (posting.length) await gh.createReview(pr.number, pr.headSha, posting.map((c) => c.comment));
   const left = fresh.length - posting.length;
-  return `Inline comments: ${posting.length} new${left ? ` (${left} more not posted: ${MAX_INLINE_PER_RUN} per run, see the summary)` : ""}, ${staled} marked no longer reported${complete ? "" : " (none: the review was incomplete, so a missing finding isn't known to be gone)"}, ${restored} restored.`;
+  return `Inline comments: ${posting.length} new${left ? ` (${left} more not posted: ${MAX_INLINE_PER_RUN} per run, see the summary)` : ""}, ${staled} marked no longer reported${kept ? ` (${kept} left as is: ${unchecked === "all" ? "the review was incomplete" : "their file wasn't fully checked"}, so the finding isn't known to be gone)` : ""}, ${restored} restored.`;
+}
+function uncheckedFiles(skipped, changed) {
+  const paths = new Set(changed);
+  const out = /* @__PURE__ */ new Set();
+  for (const g of skipped) {
+    const file = g.file.replace(/#\d+\/\d+$/, "");
+    if (!paths.has(file)) return "all";
+    out.add(file);
+  }
+  return out;
 }
 
 // action/main.ts

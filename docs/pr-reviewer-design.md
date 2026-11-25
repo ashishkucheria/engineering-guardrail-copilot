@@ -80,7 +80,8 @@ Outputs: `verdict`, `violations`, `blockers`, `incomplete`, for later steps.
 
 1. **Read the PR.** `GET /repos/{owner}/{repo}/pulls/{n}/files` (paginated) gives each file's status and patch.
    The patches are joined into one unified diff and parsed by today's `core/diff.ts`. A file without a patch
-   (GitHub leaves it out for very large files) or a binary file is a coverage gap, as in the app.
+   (GitHub leaves it out for very large files) is a coverage gap. A binary file is listed as not reviewed but is
+   not a gap, in the app too: no standard reads it, and counting it made every PR with an image `incomplete`.
 2. **Load standards from the base commit**, not the PR head: `GET /repos/{owner}/{repo}/contents/{path}?ref={base sha}`.
    Otherwise a PR could switch off the standard it violates in the same change. A PR that edits
    `.guardrail/standards/` is reviewed against the old standards; the summary says the standards changed.
@@ -151,8 +152,9 @@ so temperature is sent only where it's accepted.
 - Each carries a hidden fingerprint (standard, file, hash of the quoted code; not the line) so a re-run skips ones
   already posted instead of duplicating them. GitHub has no REST call to mark a comment outdated, so a comment
   whose finding isn't reported any more is edited to say "No longer reported in `sha` (fixed, or waived by an
-  exception)" (the fingerprint stays), and put back if the finding returns. No comment is marked on a run with
-  coverage gaps (AI failure, `max-ai-calls`), since a finding it couldn't look for isn't known to be gone. Known
+  exception)" (the fingerprint stays), and put back if the finding returns. A comment on a file the run didn't fully
+  check (an AI failure or `max-ai-calls` on one of its chunks, a size limit) is left as is, since a finding that
+  wasn't looked for isn't known to be gone; a gap that isn't about one file (findings over the cap) leaves all. Known
   limits: AI evidence can differ between runs, so an AI finding's comment may be replaced instead of kept
   (unmeasured); a deleted comment is posted again. Only the Action's own comments (author type `Bot`) are ever edited.
 - Only lines in the diff can be commented on (GitHub rejects the whole review otherwise): the first line of a

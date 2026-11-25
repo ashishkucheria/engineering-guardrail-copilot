@@ -142,13 +142,14 @@ the real services; `npm run try:provider -- <provider>` does that with your key 
 - **One summary comment**, edited on every push, never a new one.
 - Optionally (`inline-comments: true`) a **comment on each new violation's line**, as one review. Comments carry a
   hidden fingerprint (standard, file and quoted code, not the line), so a re-run doesn't repeat them. When a
-  finding isn't reported any more (fixed, or waived by an exception) its comment is edited to say so; this is
-  skipped on a run that couldn't check everything, since a finding it couldn't look for isn't known to be gone.
-  At most 25 new comments per run. See the limits below.
+  finding isn't reported any more (fixed, or waived by an exception) its comment is edited to say so, unless
+  its file wasn't fully checked on that run (the AI failed on it, or `max-ai-calls` ran out): a finding that wasn't
+  looked for isn't known to be gone. At most 25 new comments per run. See the limits below.
 - The job summary, and the outputs `verdict`, `violations`, `blockers` and `incomplete`.
 
 The check is **advisory** unless you set `fail-on`: `blocker` fails it on any blocker, `major` on any blocker or
 major. An `incomplete` review (a file or a chunk couldn't be read) is neutral unless `fail-on-incomplete: true`.
+Binary files (images, fonts) aren't a gap: no standard reads them, and the summary lists them as not reviewed.
 Make the check required in branch protection if you want it to block merges.
 
 ### Inputs

@@ -49,8 +49,9 @@ export interface InputLimits {
  * Parse pasted input into files with new-file line numbers.
  * - Snippet: one file, every line counts as added.
  * - Diff: removed lines are dropped (they are not in the new code), context lines are kept with
- *   `added: false`, deleted files are ignored, and files past the file limit (or over the per-file
- *   size limit, when one is set) are recorded as skipped.
+ *   `added: false`, deleted files are ignored, binary files are listed as not reviewed (not a gap:
+ *   no standard reads them), and files past the file limit (or over the per-file size limit, when one
+ *   is set) are recorded as skipped.
  */
 export function parseInput(input: string, limits: InputLimits = {}): ParsedInput {
   const maxFiles = limits.maxFiles ?? MAX_FILES;
@@ -72,7 +73,7 @@ export function parseInput(input: string, limits: InputLimits = {}): ParsedInput
     if (f.deleted) continue; // nothing left to review
     coverage.filesTotal++;
     if (f.binary) {
-      coverage.skipped.push({ file: f.path, reason: "binary file" });
+      (coverage.notReviewed ??= []).push({ file: f.path, reason: "binary file" });
       continue;
     }
     if (files.length >= maxFiles) {

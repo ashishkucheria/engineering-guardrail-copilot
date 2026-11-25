@@ -188,6 +188,13 @@ export function renderSummary(r: Report, opts: { marker?: boolean } = {}): strin
     if (r.coverage.skipped.length > MAX_GAPS) out.push(`- …and ${r.coverage.skipped.length - MAX_GAPS} more`);
     out.push("");
   }
+  const notReviewed = r.coverage.notReviewed ?? [];
+  if (notReviewed.length) {
+    out.push("### Not reviewed", "", "No standard reads these files, so they don't make the review incomplete.", "");
+    for (const g of notReviewed.slice(0, MAX_GAPS)) out.push(`- \`${clean(g.file, 120)}\`: ${clean(g.reason, 200)}`);
+    if (notReviewed.length > MAX_GAPS) out.push(`- …and ${notReviewed.length - MAX_GAPS} more`);
+    out.push("");
+  }
   if (!violations.length && !suggestions.length && !r.coverage.skipped.length) out.push("No findings.", "");
 
   const md = out.join("\n").trimEnd();

@@ -48,7 +48,13 @@ export interface FileChunk {
 export interface Coverage {
   filesTotal: number;
   filesReviewed: number;
+  /** Code that was not fully checked. Any entry makes the verdict "incomplete". */
   skipped: { file: string; reason: string }[];
+  /**
+   * Changed files no standard can read (binary files): listed so nothing is hidden, but not a gap,
+   * since there is no code in them to check. Absent on reviews stored before this existed.
+   */
+  notReviewed?: { file: string; reason: string }[];
 }
 
 export interface ParsedInput {
