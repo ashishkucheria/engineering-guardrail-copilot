@@ -55,7 +55,7 @@ inputs:
     required: false
     default: "50"
   github-token:
-    description: Token for reading the pull request and writing results.
+    description: Token for reading the pull request and writing results. Use the workflow's token or a GitHub App's; with a personal access token the Action can't recognise its own comments and posts new ones on every push.
     required: false
     default: ${{ github.token }}
 

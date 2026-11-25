@@ -8,10 +8,11 @@ import { GitHubClient, assembleDiff, type Annotation, type Comment, type DirEntr
 import { readInputs, readPullRequest } from "../action/main.ts";
 import type { FetchFn } from "../action/providers/http.ts";
 import { parseExceptions } from "../action/exceptions.ts";
-import { annotationsFor, checkTitle, clean, codeBlock, countFindings, fingerprint, gate, inlineBody, MAX_INLINE_PER_RUN, planInline, renderSummary, staleBody, STALE_MARKER, SUMMARY_MARKER, type Report } from "../action/publish.ts";
+import { annotationsFor, checkTitle, clean, countFindings, fingerprint, gate, inlineBody, MAX_INLINE_PER_RUN, planInline, renderSummary, staleBody, STALE_MARKER, SUMMARY_MARKER, type Report } from "../action/publish.ts";
 import { countingFetch, reviewPullRequest, syncInlineComments, uncheckedFiles, upsertSummaryComment, type Deps, type Inputs, type PrContext } from "../action/run.ts";
 import { getBoolean, getChoice, getInput, getPositiveInt, setOutput } from "../action/runner.ts";
 import { loadStandards } from "../action/standards.ts";
+import { parseInput } from "../core/diff.ts";
 import type { LlmClient } from "../core/llm.ts";
 import type { Finding, ParsedInput } from "../core/types.ts";
 
@@ -186,6 +187,26 @@ describe("assembleDiff", () => {
   it("is empty when there's nothing to read", () => {
     expect(assembleDiff([{ filename: "x", status: "removed", changes: 1 }]).diff).toBe("");
   });
+  it("a file name with a line break is a gap, never part of the diff", () => {
+    const { diff, gaps } = assembleDiff([
+      { filename: "a.ts\n--- a/q\n+++ b/vendor/q.ts", status: "added", changes: 1, patch: "@@ -0,0 +1,1 @@\n+const k = 1;" },
+      { filename: "ok.ts", status: "renamed", previous_filename: "old\tname.ts", changes: 1, patch: "@@ -1,1 +1,1 @@\n-a\n+b" },
+      added("src/fine.ts", "export const a = 1;"),
+    ]);
+    expect(gaps.map((g) => g.reason)).toEqual(["file name has control characters", "file name has control characters"]);
+    expect(parseInput(diff).files.map((f) => f.path)).toEqual(["src/fine.ts"]);
+  });
+  it("a removed '-- x' and an added '++ y' inside a patch stay that file's lines, not a new file header", () => {
+    const patch = ["@@ -1,2 +1,2 @@", " const a = 1;", "--- a/x", "+++ b/vendor/x.ts", "@@ -10,1 +10,2 @@", " const b = 2;", "+const hidden = 1;"].join("\n");
+    const p = parseInput(assembleDiff([{ filename: "src/real.ts", status: "modified", changes: 3, patch }]).diff);
+    expect(p.files.map((f) => f.path)).toEqual(["src/real.ts"]);
+    expect(p.files[0]!.lines).toEqual([
+      { n: 1, text: "const a = 1;", added: false },
+      { n: 2, text: "++ b/vendor/x.ts", added: true },
+      { n: 10, text: "const b = 2;", added: false },
+      { n: 11, text: "const hidden = 1;", added: true },
+    ]);
+  });
 });
 
 describe("GitHubClient", () => {
@@ -235,21 +256,25 @@ describe("GitHubClient", () => {
 describe("gate", () => {
   const c = (blockers: number, majors: number, minors = 0) => ({ violations: blockers + majors + minors, blockers, majors, suggestions: 0 });
   it("is advisory by default", () => {
-    expect(gate("fail", c(1, 0), "none", false)).toBe("neutral");
-    expect(gate("warn", c(0, 1), "none", false)).toBe("neutral");
-    expect(gate("pass", c(0, 0), "none", false)).toBe("success");
+    expect(gate(false, c(1, 0), "none", false)).toBe("neutral");
+    expect(gate(false, c(0, 1), "none", false)).toBe("neutral");
+    expect(gate(false, c(0, 0), "none", false)).toBe("success");
   });
   it("fail-on blocker fails on a blocker only", () => {
-    expect(gate("fail", c(1, 0), "blocker", false)).toBe("failure");
-    expect(gate("warn", c(0, 2), "blocker", false)).toBe("neutral");
+    expect(gate(false, c(1, 0), "blocker", false)).toBe("failure");
+    expect(gate(false, c(0, 2), "blocker", false)).toBe("neutral");
   });
   it("fail-on major fails on a blocker or a major", () => {
-    expect(gate("warn", c(0, 1), "major", false)).toBe("failure");
-    expect(gate("warn", c(0, 0, 3), "major", false)).toBe("neutral");
+    expect(gate(false, c(0, 1), "major", false)).toBe("failure");
+    expect(gate(false, c(0, 0, 3), "major", false)).toBe("neutral");
   });
   it("incomplete is neutral unless fail-on-incomplete", () => {
-    expect(gate("incomplete", c(0, 0), "major", false)).toBe("neutral");
-    expect(gate("incomplete", c(0, 0), "none", true)).toBe("failure");
+    expect(gate(true, c(0, 0), "major", false)).toBe("neutral");
+    expect(gate(true, c(0, 0), "none", true)).toBe("failure");
+  });
+  it("a blocker doesn't hide unread code from fail-on-incomplete", () => {
+    expect(gate(true, c(1, 0), "none", true)).toBe("failure");
+    expect(gate(true, c(1, 0), "none", false)).toBe("neutral");
   });
   it("counts exclude waived findings and suggestions", () => {
     expect(countFindings([finding(), finding({ waivedBy: "e1" }), finding({ classification: "suggestion" })])).toEqual({ violations: 1, blockers: 1, majors: 0, suggestions: 1 });
@@ -267,9 +292,14 @@ describe("escaping model text", () => {
     expect(out).toContain("a\\|b");
     expect(out).not.toContain("`");
   });
-  it("fences code longer than any backtick run inside it", () => {
-    expect(codeBlock("a ```` b")).toMatch(/^`{5}\n/);
-    expect(codeBlock("plain")).toBe("```\nplain\n```");
+  it("breaks what GitHub would make live: bare URLs, www links and issue references", () => {
+    const out = clean("Log in at https://evil.test/login or www.evil.test, see #12, other/repo#3 and GH-7. C# and a#b stay.");
+    expect(out).not.toContain("https://");
+    expect(out).not.toContain("www.");
+    expect(out).not.toMatch(/#\d/);
+    expect(out).not.toMatch(/GH-\d/);
+    // Nothing is removed: without the zero-width spaces the text reads as it was written
+    expect(out.replace(/\u200b/g, "")).toBe("Log in at https://evil.test/login or www.evil.test, see #12, other/repo#3 and GH-7. C# and a#b stay.");
   });
   it("annotation levels follow severity; suggestions are notices; waived findings are left out", () => {
     const a = annotationsFor([
@@ -394,6 +424,19 @@ describe("reviewPullRequest", () => {
     expect(rec.created[0]).toContain("changes the standards folder");
   });
 
+  it("a blocker with unread code: the verdict is fail, and the run still counts as incomplete", async () => {
+    const files = [added("src/config.ts", SECRET_LINE), { filename: "src/huge.ts", status: "modified", changes: 90_000 }];
+    const off = await reviewPullRequest(pr(), inputs(), harness({ files }).deps);
+    expect(off).toMatchObject({ verdict: "fail", incomplete: true, conclusion: "neutral" });
+    const on = await reviewPullRequest(pr(), inputs({ failOnIncomplete: true }), harness({ files }).deps);
+    expect(on).toMatchObject({ verdict: "fail", incomplete: true, conclusion: "failure" });
+  });
+  it("marks earlier inline comments when the pull request has nothing left to read", async () => {
+    const h = harness({ files: [{ filename: "src/gone.ts", status: "removed", changes: 3 }] });
+    h.deps.github.listReviewComments = async () => [{ id: 4, body: inlineBody(finding({ file: "src/gone.ts" })), user: { type: "Bot" }, path: "src/gone.ts" }];
+    await reviewPullRequest(pr(), inputs({ inlineComments: true }), h.deps);
+    expect(h.rec.edited.map((e) => e.id)).toEqual([4]);
+  });
   it("fork on pull_request: rules only, an incomplete verdict, and nothing written to the PR", async () => {
     let built = false;
     const { deps, rec } = harness({ files: badFiles, makeClient: () => ((built = true), fetchingModel()!({ provider: "x" })!) });

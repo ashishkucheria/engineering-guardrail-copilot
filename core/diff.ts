@@ -4,7 +4,8 @@ export const MAX_INPUT_BYTES = 100_000;
 export const MAX_FILES = 20;
 export const SNIPPET_PATH = "snippet";
 
-const HUNK = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
+/** Captures: old line count, new start line, new line count (a count left out means 1). */
+const HUNK = /^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
 
 /** A unified diff has file headers or hunk headers; anything else is treated as a snippet. */
 export function looksLikeDiff(input: string): boolean {
@@ -104,6 +105,9 @@ function splitDiffFiles(text: string): RawFile[] {
   let cur: RawFile | null = null;
   let newLine = 0;
   let inHunk = false;
+  // Lines the current hunk's header still promises, old side and new side.
+  let oldLeft = 0;
+  let newLeft = 0;
 
   const start = (path: string) => {
     cur = { path, lines: [], deleted: false, binary: false };
@@ -122,8 +126,12 @@ function splitDiffFiles(text: string): RawFile[] {
       headerOpen = true;
       continue;
     }
-    // "--- x" followed by "+++ y" is a file header, even straight after another file's hunk.
-    if (line.startsWith("--- ") && all[i + 1]?.startsWith("+++ ")) {
+    // "--- x" followed by "+++ y" is a file header, even straight after another file's hunk. Inside a
+    // hunk that still expects a removed and an added line it is exactly those: a removed "-- x" and an
+    // added "++ y". Reading that pair as a header would let a change rename the rest of its own file
+    // (to a path the model skips, or one an exception waives).
+    const insideHunk = inHunk && oldLeft > 0 && newLeft > 0;
+    if (!insideHunk && line.startsWith("--- ") && all[i + 1]?.startsWith("+++ ")) {
       const target = all[i + 1]!.slice(4).trim();
       if (!headerOpen) start(stripPrefix(target === "/dev/null" ? line.slice(4) : target));
       headerOpen = false;
@@ -148,15 +156,24 @@ function splitDiffFiles(text: string): RawFile[] {
     }
     const hunk = HUNK.exec(line);
     if (hunk) {
-      newLine = Number(hunk[1]);
+      oldLeft = hunk[1] === undefined ? 1 : Number(hunk[1]);
+      newLine = Number(hunk[2]);
+      newLeft = hunk[3] === undefined ? 1 : Number(hunk[3]);
       inHunk = true;
       continue;
     }
     if (!inHunk) continue; // index lines, mode lines, etc.
-    if (line.startsWith("+")) c.lines.push({ n: newLine++, text: line.slice(1), added: true });
-    else if (line.startsWith(" ")) c.lines.push({ n: newLine++, text: line.slice(1), added: false });
-    else if (line === "") c.lines.push({ n: newLine++, text: "", added: false });
-    else if (line.startsWith("-") || line.startsWith("\\")) continue; // removed line / "No newline at end of file"
+    // The counts only decide the header question above; a hunk with more lines than its header says
+    // (a hand-edited diff) is still read to its end.
+    if (line.startsWith("+")) {
+      c.lines.push({ n: newLine++, text: line.slice(1), added: true });
+      newLeft--;
+    } else if (line.startsWith(" ") || line === "") {
+      c.lines.push({ n: newLine++, text: line.slice(1), added: false });
+      oldLeft--;
+      newLeft--;
+    } else if (line.startsWith("-")) oldLeft--; // removed line
+    else if (line.startsWith("\\")) continue; // "No newline at end of file"
     else inHunk = false; // something else: the hunk is over
   }
   return out;

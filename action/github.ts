@@ -202,14 +202,22 @@ export interface AssembledDiff {
  * A file without a patch is either binary (GitHub reports no changed lines for it) or too large for
  * GitHub to include; the first becomes a binary file parseInput lists as not reviewed (not a gap), the
  * second a gap returned here. Generated files (lock files, `dist/`) are the exception: with no patch they are
- * skipped without a gap, as they would be with one.
+ * skipped without a gap, as they would be with one. A file whose name has control characters is a gap
+ * too: the name can't go into a diff header without changing what the header says.
  */
+const CONTROL = /[\u0000-\u001f\u007f]/;
+
 export function assembleDiff(files: PullFile[]): AssembledDiff {
   const parts: string[] = [];
   const gaps: AssembledDiff["gaps"] = [];
   for (const f of files) {
     if (f.status === "removed") continue;
     const from = f.previous_filename ?? f.filename;
+    // A line break in a name would add lines to the header below and could pass for another file's.
+    if (CONTROL.test(f.filename) || CONTROL.test(from)) {
+      gaps.push({ file: f.filename, reason: "file name has control characters" });
+      continue;
+    }
     const header = [`diff --git a/${from} b/${f.filename}`, `--- a/${from}`, `+++ b/${f.filename}`];
     if (f.patch) {
       parts.push([...header, f.patch.endsWith("\n") ? f.patch.slice(0, -1) : f.patch].join("\n"));

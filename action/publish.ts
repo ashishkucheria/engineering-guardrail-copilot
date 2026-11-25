@@ -40,12 +40,15 @@ export function countFindings(findings: Pick<Finding, "classification" | "severi
 
 /**
  * The check's conclusion (design §7). Advisory unless `failOn` says otherwise; findings waived by
- * an exception never count. `incomplete` is neutral unless `failOnIncomplete`.
+ * an exception never count. A review with coverage gaps is neutral unless `failOnIncomplete`.
+ *
+ * `incomplete` is "some code wasn't checked", not the verdict: with a blocker the verdict is `fail`
+ * whatever the coverage, and that must not hide the gaps from `failOnIncomplete`.
  */
-export function gate(verdict: Verdict, counts: Counts, failOn: FailOn, failOnIncomplete: boolean): Conclusion {
+export function gate(incomplete: boolean, counts: Counts, failOn: FailOn, failOnIncomplete: boolean): Conclusion {
   if (failOn === "blocker" && counts.blockers > 0) return "failure";
   if (failOn === "major" && counts.blockers + counts.majors > 0) return "failure";
-  if (verdict === "incomplete") return failOnIncomplete ? "failure" : "neutral";
+  if (incomplete) return failOnIncomplete ? "failure" : "neutral";
   return counts.violations > 0 ? "neutral" : "success";
 }
 
@@ -59,22 +62,24 @@ export function checkTitle(verdict: Verdict, c: Counts): string {
 
 // --- Escaping --------------------------------------------------------------------------------
 
-/** One line of untrusted text, safe inside a Markdown table cell or sentence. */
+const ZWSP = "\u200b";
+
+/**
+ * One line of untrusted text, safe inside a Markdown table cell or sentence. A zero-width space breaks
+ * what GitHub would otherwise turn into something live: an @mention (it notifies), a bare URL (it
+ * becomes a link) and an issue reference like #12 or owner/repo#12 (it posts a backlink there).
+ */
 export function clean(text: string, max = 400): string {
   const flat = text.replace(/\s+/g, " ").trim();
   const cut = flat.length > max ? `${flat.slice(0, max)}…` : flat;
   return cut
     .replace(/[<>[\]|]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "[": "\\[", "]": "\\]", "|": "\\|" })[c]!)
-    .replace(/@/g, "@​") // a zero-width space stops a @mention from notifying anyone
+    .replace(/@/g, `@${ZWSP}`)
+    .replace(/:\/\//g, `:${ZWSP}//`)
+    .replace(/\bwww\./gi, `www${ZWSP}.`)
+    .replace(/#(?=\d)/g, `#${ZWSP}`)
+    .replace(/\bGH-(?=\d)/gi, `GH${ZWSP}-`)
     .replace(/`/g, "'");
-}
-
-/** A code block whose fence is longer than any run of backticks inside it. */
-export function codeBlock(text: string, max = 1_500): string {
-  const body = text.length > max ? `${text.slice(0, max)}\n…` : text;
-  const longest = Math.max(0, ...[...body.matchAll(/`+/g)].map((m) => m[0].length));
-  const fence = "`".repeat(Math.max(3, longest + 1));
-  return `${fence}\n${body}\n${fence}`;
 }
 
 const place = (f: Pick<Finding, "file" | "lineStart" | "lineEnd">) => `${f.file}:${f.lineStart}${f.lineEnd > f.lineStart ? `-${f.lineEnd}` : ""}`;
@@ -146,7 +151,7 @@ export function renderSummary(r: Report, opts: { marker?: boolean } = {}): strin
     "",
   );
 
-  const how = [r.provider === "none" ? "Rules only (`provider: none`)" : `Rules and AI (\`${clean(r.provider)}\`${r.model ? `, \`${clean(r.model)}\`` : ""})`];
+  const how = [r.provider === "none" ? (r.aiNote ? "Rules only" : "Rules only (`provider: none`)") : `Rules and AI (\`${clean(r.provider)}\`${r.model ? `, \`${clean(r.model)}\`` : ""})`];
   how.push(r.standardsSource === "repository" ? "standards from this repository's base commit" : "built-in standards");
   out.push(`${how.join("; ")}. Commit \`${r.headSha.slice(0, 7)}\`.`, "");
   if (r.standardsChanged) out.push("> This pull request changes the standards folder. It was reviewed against the standards at the base commit, so the change takes effect after it merges.", "");
