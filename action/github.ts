@@ -40,6 +40,16 @@ export interface Comment {
   user?: { type?: string } | null;
 }
 
+export interface ReviewComment extends Comment {
+  path?: string;
+}
+
+export interface InlineComment {
+  path: string;
+  line: number;
+  body: string;
+}
+
 export interface GitHubOptions {
   token: string;
   /** "owner/name" */
@@ -137,6 +147,17 @@ export class GitHubClient {
     return created.id;
   }
 
+  listReviewComments(number: number): Promise<ReviewComment[]> {
+    return this.paged<ReviewComment>(`/pulls/${number}/comments`);
+  }
+  /** One pull request review holding all the comments, on the commit that was reviewed. */
+  async createReview(number: number, commitId: string, comments: InlineComment[]): Promise<void> {
+    await this.json("POST", `/pulls/${number}/reviews`, { commit_id: commitId, event: "COMMENT", comments: comments.map((c) => ({ path: c.path, line: c.line, side: "RIGHT", body: c.body })) });
+  }
+  async updateReviewComment(id: number, body: string): Promise<void> {
+    await this.json("PATCH", `/pulls/comments/${id}`, { body });
+  }
+
   listIssueComments(number: number): Promise<Comment[]> {
     return this.paged<Comment>(`/issues/${number}/comments`);
   }
@@ -179,8 +200,8 @@ export interface AssembledDiff {
 /**
  * Join the per-file patches of `pulls/{n}/files` into one unified diff. Deleted files are left out.
  * A file without a patch is either binary (GitHub reports no changed lines for it) or too large for
- * GitHub to include; the first becomes the "binary file" gap parseInput already records, the second
- * a gap returned here. Generated files (lock files, `dist/`) are the exception: with no patch they are
+ * GitHub to include; the first becomes a binary file parseInput lists as not reviewed (not a gap), the
+ * second a gap returned here. Generated files (lock files, `dist/`) are the exception: with no patch they are
  * skipped without a gap, as they would be with one.
  */
 export function assembleDiff(files: PullFile[]): AssembledDiff {

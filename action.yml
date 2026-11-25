@@ -42,6 +42,10 @@ inputs:
     description: Keep one summary comment up to date on the pull request.
     required: false
     default: "true"
+  inline-comments:
+    description: Comment on each new violation's line (one review per run, at most 25 new comments). Comments for findings that are gone are edited to say so.
+    required: false
+    default: "false"
   max-ai-calls:
     description: Upper bound on provider requests per run, retries included.
     required: false

@@ -33,7 +33,7 @@ describe("parseInput", () => {
     expect(p.files[1]!.lines).toEqual([{ n: 5, text: "y", added: true }]);
   });
 
-  it("ignores deleted files and records binary files as not reviewed", () => {
+  it("ignores deleted files and lists binary files as not reviewed, without a coverage gap", () => {
     const p = parseInput(
       diff(
         "diff --git a/gone.ts b/gone.ts", "deleted file mode 100644", "--- a/gone.ts", "+++ /dev/null", "@@ -1 +0,0 @@", "-bye",
@@ -43,7 +43,8 @@ describe("parseInput", () => {
     );
     expect(p.files.map((f) => f.path)).toEqual(["ok.ts"]);
     expect(p.coverage.filesTotal).toBe(2);
-    expect(p.coverage.skipped).toEqual([{ file: "logo.png", reason: "binary file" }]);
+    expect(p.coverage.skipped).toEqual([]);
+    expect(p.coverage.notReviewed).toEqual([{ file: "logo.png", reason: "binary file" }]);
   });
 
   it(`records files past the ${MAX_FILES}-file limit instead of dropping them silently`, () => {
